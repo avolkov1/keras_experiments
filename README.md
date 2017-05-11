@@ -5,8 +5,13 @@ Experimental Keras libraries and examples.
 #### Examples
 * [cifar10\_cnn\_mgpu.py](examples/cifar/cifar10_cnn_mgpu.py)
 
-    Cifar10 example with multi-GPU options.
-
+    Cifar10 example with multi-GPU options. Run it as follows:
+    ```bash
+    python examples/cifar/cifar10_cnn_mgpu.py --help # read instructions
+    # Use CUDA_VISIBLE_DEVICES to mask GPUs from Tensorflow otherwise uses all.
+    CUDA_VISIBLE_DEVICES=0,1,2 python \
+        examples/cifar/cifar10_cnn_mgpu.py --mgpu --epochs=10 --checkpt
+    ```
 
 #### Usage
 Refer to the example above for detailed usage. Typical usage is to define
