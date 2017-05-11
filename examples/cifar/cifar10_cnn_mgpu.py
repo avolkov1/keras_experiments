@@ -226,6 +226,7 @@ def main(argv=None):
         ngpus = len(gpus_list)
         print('Using GPUs: {}'.format(', '.join(gpus_list)))
         batch_size = batch_size * ngpus  #
+        # batch_size = 40000  # split over four devices works fine.
 
         # Data-Parallelize the model via function or class.
         model = make_parallel(model_init, gpus_list, usenccl=usenccl,
@@ -239,8 +240,9 @@ def main(argv=None):
             opt = RMSPropMGPU(lr=0.0001, decay=1e-6, gdev_list=gpus_list)
 
     else:
-        model = model_init()
+        model = model_init
         # batch_size = batch_size * 3
+        # batch_size = 40000  # exhaust GPU memory. Crashes.
         print(model.summary())
 
         # initiate RMSprop optimizer
