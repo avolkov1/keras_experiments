@@ -102,7 +102,7 @@ class TensorBoardEmbeddingMixin(object):
                     self.saver.save(self.sess, log, epoch)
 
 
-@mixedomatic
+@mixedomatic()
 class TensorBoardEmbedding(TensorBoardEmbeddingMixin, TensorBoard):
     """Tensorboard for Embeddings.
 

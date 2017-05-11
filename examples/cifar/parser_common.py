@@ -50,6 +50,15 @@ def parser_def_mgpu(desc):
         '\nspecify --mgpu to use this specified device list.'
         '\nThis option is only supported with TensorFlow backend.')
 
+    parser.add_argument('--enqueue', action='store_true', default=False,
+                        help='S|Use StagingArea in multi-gpu model.\n')
+
+    parser.add_argument('--syncopt', action='store_true', default=False,
+                        help='S|Use gradient synchronization in Optimizer.\n')
+
+    parser.add_argument('--nccl', action='store_true', default=False,
+                        help='S|Use NCCL contrib lib.\n')
+
     parser.add_argument('--epochs', type=int, default=200,
                         help='Number of epochs to run training for.')
 
