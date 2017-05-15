@@ -2,7 +2,7 @@ from __future__ import print_function
 
 import sys
 import numpy as np
-import tensorflow as tf  # @UnresolvedImport
+import tensorflow as tf
 
 from keras.backend import tensorflow_backend as tfb
 from keras.backend.tensorflow_backend import (

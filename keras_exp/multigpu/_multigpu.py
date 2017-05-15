@@ -27,8 +27,8 @@ if KB.backend() == 'tensorflow':
     from keras_exp._patch_tf_backend import patch as tfbpatch
     tfbpatch()
 
-    import tensorflow as tf  # @UnresolvedImport
-    from tensorflow.python.client import device_lib  # @UnresolvedImport
+    import tensorflow as tf
+    from tensorflow.python.client import device_lib
 
     try:
         from tensorflow.contrib import nccl
@@ -38,7 +38,7 @@ if KB.backend() == 'tensorflow':
         have_nccl = False
         print('WARNING: NCCL support not available', file=sys.stderr)
 
-    from tensorflow.python.ops import data_flow_ops  # @UnresolvedImport
+    from tensorflow.python.ops import data_flow_ops
 
 
 _DEBUG = False

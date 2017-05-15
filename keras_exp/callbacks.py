@@ -8,9 +8,8 @@ from keras.layers import Embedding
 from ._mixin_common import mixedomatic
 
 if K.backend() == 'tensorflow':
-    import tensorflow as tf  # @NoMove @UnresolvedImport
-    from tensorflow.contrib.tensorboard.plugins import (
-        projector,)  # @NoMove @UnresolvedImport
+    import tensorflow as tf
+    from tensorflow.contrib.tensorboard.plugins import projector
     from keras.callbacks import TensorBoard
 
 

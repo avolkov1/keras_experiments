@@ -16,7 +16,7 @@ if _DEBUG:
     pass
 
 if K.backend() == 'tensorflow':
-    import tensorflow as tf  # @UnresolvedImport
+    import tensorflow as tf
 
     try:
         from tensorflow.contrib import nccl

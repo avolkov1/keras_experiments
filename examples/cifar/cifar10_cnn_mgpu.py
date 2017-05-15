@@ -182,8 +182,6 @@ def main(argv=None):
     logdevp = args.logdevp
 
     # The data, shuffled and split between train and test sets:
-    # import tensorflow as tf  # @UnresolvedImport
-    # with tf.device('/cpu:0'):
     (x_train, y_train), (x_test, y_test) = cifar10.load_data()
     print(x_train.shape[0], 'train samples')
     print(x_test.shape[0], 'test samples')
@@ -200,7 +198,7 @@ def main(argv=None):
     callbacks = None
 
     if _DEVPROF or logdevp:
-        import tensorflow as tf  # @UnresolvedImport
+        import tensorflow as tf
 
         # Setup Keras session using Tensorflow
         config = tf.ConfigProto(allow_soft_placement=True,
@@ -226,7 +224,8 @@ def main(argv=None):
         ngpus = len(gpus_list)
         print('Using GPUs: {}'.format(', '.join(gpus_list)))
         batch_size = batch_size * ngpus  #
-        # batch_size = 40000  # split over four devices works fine.
+        # batch_size = 40000  # split over four devices works fine no grad avg
+        # batch_size = 25000  # split over four devices works fine w/ grad avg
 
         # Data-Parallelize the model via function or class.
         model = make_parallel(model_init, gpus_list, usenccl=usenccl,
@@ -242,7 +241,7 @@ def main(argv=None):
     else:
         model = model_init
         # batch_size = batch_size * 3
-        # batch_size = 40000  # exhaust GPU memory. Crashes.
+        # batch_size = 25000  # exhaust GPU memory. Crashes.
         print(model.summary())
 
         # initiate RMSprop optimizer
