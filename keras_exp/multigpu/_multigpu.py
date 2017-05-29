@@ -26,7 +26,7 @@ from keras.models import Model
 from keras.layers.merge import Concatenate  # , Average)
 # import keras.layers as KL
 
-from keras_exp.dataflow.keras_models import ModelDataflowMixin
+from keras_exp._mixin_models import ModelDataflowMixin
 
 
 if KB.backend() == 'tensorflow':
