@@ -13,6 +13,18 @@ Experimental Keras libraries and examples.
         examples/cifar/cifar10_cnn_mgpu.py --mgpu --epochs=10 --checkpt
     ```
 
+* [cifar10\_cnn\_distrib\_slurm.py](examples/cifar/cifar10_cnn_distrib_slurm.py)
+
+    Cifar10 example experimentation with distribution on a SLURM cluster. The
+    run command would be something similar to:
+    ```bash
+    srun python examples/cifar/cifar10_cnn_distrib_slurm.py
+    ```
+    Run a test via:
+    ```bash
+    srun python -m keras_exp.distrib.slurm
+    ```
+
 #### Usage
 Refer to the example above for detailed usage. Typical usage is to define
 a Keras model and then call the model conversion function or class to make it

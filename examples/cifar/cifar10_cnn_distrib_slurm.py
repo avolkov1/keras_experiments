@@ -8,18 +8,20 @@ used):
 It gets down to 0.65 test logloss in 25 epochs, and down to 0.55 after 50
 epochs. (it's still underfitting at that point, though).
 '''
-
 from __future__ import print_function
+
 import sys
 import os
 
 from argparse import SUPPRESS
 
+# from time import sleep
+
 import numpy as np
 from datetime import datetime
 import threading
 
-from parser_common import parser_def_mgpu
+from parser_common import (parser_def_mgpu, remove_options)
 
 from keras.utils import to_categorical
 from keras.datasets import cifar10
@@ -35,7 +37,12 @@ from keras.optimizers import RMSprop
 from keras_exp.multigpu import (get_available_gpus, print_mgpu_modelsummary)
 # from keras_exp.multigpu import ModelMGPU
 from keras_exp.multigpu import make_parallel
-from keras_exp.multigpu.optimizers import RMSPropMGPU
+# from keras_exp.multigpu.optimizers import RMSPropMGPU
+
+import tensorflow as tf
+
+from keras_exp.distrib.slurm import SlurmClusterParser
+from keras_exp.distrib import (TFClusterManagerFacade, JobType, DevType)
 
 # from functools import partial
 
@@ -44,6 +51,7 @@ _DEVPROF = False
 
 def parser_(desc):
     parser = parser_def_mgpu(desc)
+    remove_options(parser, ['--mgpu', '--nccl'])
 
     checkptfile = 'cifar10_cnn_mgpu.weights.best.hdf5'
     parser.add_argument(
@@ -95,7 +103,6 @@ def mygenerator(nsamples, batch_size, x_train, y_train):
             int(datetime.now().strftime("%Y%m%d%H%M%S%f"))) % 4294967295
     np.random.RandomState(seed)
     while 1:
-        # np.random.shuffle()
         idx_shuffle = np.random.permutation(nsamples)
         for i in range(steps_per_epoch):
             start_ = i * batch_size
@@ -160,14 +167,15 @@ def main(argv=None):
     '''
     '''
     main.__doc__ = __doc__
+
     argv = sys.argv if argv is None else sys.argv.extend(argv)
     desc = main.__doc__  # .format(os.path.basename(__file__))
     # CLI parser
     args = parser_(desc)
-    mgpu = 0 if getattr(args, 'mgpu', None) is None else args.mgpu
-    enqueue = args.enqueue
-    usenccl = args.nccl
-    syncopt = args.syncopt
+    # mgpu = 0 if getattr(args, 'mgpu', None) is None else args.mgpu
+    # enqueue = args.enqueue
+    # usenccl = args.nccl
+    # syncopt = args.syncopt
 
     checkpt = getattr(args, 'checkpt', None)
     checkpt_flag = False if checkpt is None else True
@@ -181,6 +189,65 @@ def main(argv=None):
 
     logdevp = args.logdevp
 
+    # ---------------------------------------------- Distributed setup on SLURM
+    scpar = SlurmClusterParser()
+
+    logdevp_flag = True if _DEVPROF or logdevp else False
+    gpu_options = tf.GPUOptions(allow_growth=True)
+    config = tf.ConfigProto(log_device_placement=logdevp_flag,  # True,
+                            allow_soft_placement=True,
+                            gpu_options=gpu_options)
+
+    cmgr_facade = TFClusterManagerFacade(
+        scpar.num_tasks_per_host, scpar.hostnames,
+        scpar.num_parameter_servers, scpar.my_proc_id)
+    # TF 1.2.x RDMA: specify protocol='grpc+verbs' in server below.
+    server = cmgr_facade.get_server(config)
+    tfsess = cmgr_facade.get_session(server)
+    KB.set_session(tfsess)
+
+    # TODO: Try
+    #     sv = tf.train.Supervisor(...)
+    #     with sv.managed_session(server.target, config=config) ...
+    #     sess = sv.prepare_or_wait_for_session(server.target,
+    #                                           config=sess_config)
+    #     KB.set_session(tfsess)  # based on this managed session.
+
+    #: :type cluster_spec: tf.train.ClusterSpec
+    # cluster_spec = cmgr_facade.get_cluster_spec()
+    job_type = cmgr_facade.myjobtype
+    # task_id = cmgr_facade.mytask_id
+
+    is_chief = cmgr_facade.is_chief
+
+    if job_type == JobType.ps:
+        # JOIN PARAMETER SERVERS
+        # server.join()
+        cmgr_facade.join(server)
+
+    # Once the server is started everything but the chief worker can join
+    # the server and wait to process/service graph computations. Chief pushes
+    # the compute graph.
+    if not is_chief:
+        # JOIN WORKERS (PS also) EXCEPT FOR CHIEF
+        cmgr_facade.join(server)
+
+    # sleep(2)  # Have the chief wait just in case. Occasionally get errors.
+
+    # The ngpus per host needs to be done with MPI or somehow sync'd. Currently
+    # assuming all hosts have the same number of GPUs.
+    gdev_list = get_available_gpus()
+    ngpus = len(gdev_list)
+
+    #: :type mywgdev: tf.DeviceSpec
+    # mywgdev, wgdev_list = cmgr_facade.get_workers_dev_list(ngpus)
+    _, wgdev_list = cmgr_facade.get_workers_dev_list(ngpus)
+    nworker_devices_total = len(wgdev_list)
+    # print('\n\tCLUSTER_SPEC_DICT: {}\n\tWGDEV_LIST: {}\n'
+    #       .format(cmgr_facade.clusterspec_dict,
+    #               [dev.to_string() for dev in wgdev_list]))  # DEBUG
+
+    # ------------------------------------ Data loading and basic preprocessing
     # The data, shuffled and split between train and test sets:
     (x_train, y_train), (x_test, y_test) = cifar10.load_data()
     print(x_train.shape[0], 'train samples')
@@ -197,19 +264,28 @@ def main(argv=None):
 
     callbacks = None
 
-    if _DEVPROF or logdevp:
-        import tensorflow as tf
-
-        # Setup Keras session using Tensorflow
-        config = tf.ConfigProto(allow_soft_placement=True,
-                                log_device_placement=True)
-        # config.gpu_options.allow_growth = True
-        tfsess = tf.Session(config=config)
-        KB.set_session(tfsess)
-
     print(x_train.shape, 'train shape')
-    model_init = make_model(x_train.shape, num_classes,
-                            filepath if checkpt_flag else None)
+
+    # --------------------------------------------- Setup model and parallelize
+    def _load_fn(unused_op):
+        return 1
+
+    cspec = cmgr_facade.get_cluster_spec()
+    num_ps = cspec.num_tasks(JobType.ps)
+    ps_strategy = \
+        tf.contrib.training.GreedyLoadBalancingStrategy(num_ps, _load_fn)
+
+    ps_device = tf.DeviceSpec(job=JobType.ps, device_type=DevType.cpu,
+                              device_index=0).to_string()
+
+    rdsetter = tf.train.replica_device_setter(
+        cluster=cspec,
+        ps_strategy=ps_strategy,
+        ps_device=ps_device,  # '/job:ps/cpu:0'  # seems to work
+    )
+    with tf.device(rdsetter):
+        model_init = make_model(x_train.shape, num_classes,
+                                filepath if checkpt_flag else None)
 
     # model_init = partial(make_model, x_train.shape, num_classes,
     #                      filepath if checkpt_flag else None)
@@ -219,33 +295,38 @@ def main(argv=None):
                                      save_best_only=True, mode='max')
         callbacks = [checkpoint]
 
-    if mgpu > 1 or mgpu == -1:
-        gpus_list = get_available_gpus(mgpu)
-        ngpus = len(gpus_list)
-        print('Using GPUs: {}'.format(', '.join(gpus_list)))
-        batch_size = batch_size * ngpus  #
-        # batch_size = 40000  # split over four devices works fine no grad avg
-        # batch_size = 25000  # split over four devices works fine w/ grad avg
+    print('\n\tCLUSTER_SPEC_DICT: {}\n\tWGDEV_LIST: {}\n'
+          .format(cmgr_facade.clusterspec_dict,
+                  [dev.to_string() for dev in wgdev_list]))  # DEBUG
 
-        # Data-Parallelize the model via function or class.
-        model = make_parallel(model_init, gpus_list, usenccl=usenccl,
-                              syncopt=syncopt, enqueue=enqueue)
-        # model = ModelMGPU(serial_model=model_init, gdev_list=gpus_list,
-        #                   syncopt=syncopt, usenccl=usenccl, enqueue=enqueue)
-        print_mgpu_modelsummary(model)
-        if not syncopt:
-            opt = RMSprop(lr=0.0001, decay=1e-6)
-        else:
-            opt = RMSPropMGPU(lr=0.0001, decay=1e-6, gdev_list=gpus_list)
+    batch_size = batch_size * nworker_devices_total
+    # batch_size = 40000  # split over four devices works fine no grad avg
+    # batch_size = 25000  # split over four devices works fine w/ grad avg
 
-    else:
-        model = model_init
-        # batch_size = batch_size * 3
-        # batch_size = 25000  # exhaust GPU memory. Crashes.
-        print(model.summary())
+    # ps_device = rdsetter
+    # ps_device = '/job:ps/cpu:0'
+    # ps_device = '/cpu:0'
+    # ps_device = tf.train.replica_device_setter(
+    #     ps_device="/job:ps/cpu:0",
+    #     worker_device=mywgdev.to_string(),
+    #     cluster=cmgr_facade.get_cluster_spec())
 
-        # initiate RMSprop optimizer
-        opt = RMSprop(lr=0.0001, decay=1e-6)
+    # TODO: Use replica_device_setter and do not join workers above. Try using
+    # managed session.
+    # Need to think about this because what I want is to have the workers
+    # load the relevant data on the node they are running from instead of
+    # loading on chief rank's node and transferring slices over network.
+    # Maybe parameter servers can do this via ZeroMQ.
+    # Ref: https://gist.github.com/fchollet/2c9b029f505d94e6b8cd7f8a5e244a4e
+
+    # Data-Parallelize the model via function or class.
+    model = make_parallel(model_init, wgdev_list, ps_device=ps_device)
+    # model = ModelMGPU(serial_model=model_init, gdev_list=gpus_list,
+    #                   syncopt=syncopt, usenccl=usenccl, enqueue=enqueue)
+    print_mgpu_modelsummary(model)
+
+    # ------------------------------------------------------------ Run training
+    opt = RMSprop(lr=0.0001, decay=1e-6)
 
     # Let's train the model using RMSprop
     model.compile(loss='categorical_crossentropy',
@@ -302,6 +383,12 @@ def main(argv=None):
                             epochs=epochs,
                             validation_data=(x_test, y_test),
                             callbacks=callbacks)
+
+    # ------------------------------------------------------------- STOP SERVER
+    # if not is_chief:
+    #     # JOIN WORKERS (PS also) EXCEPT FOR CHIEF
+    #     cmgr_facade.join(server)
+    cmgr_facade.stop_chief(server)
 
 
 if __name__ == '__main__':

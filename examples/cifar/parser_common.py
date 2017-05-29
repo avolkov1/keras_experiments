@@ -6,7 +6,7 @@ from argparse import (
 from textwrap import dedent
 
 
-__all__ = ('parser_def_mgpu',)
+__all__ = ('parser_def_mgpu', 'remove_options',)
 
 
 class SmartFormatterMixin(HelpFormatter):
@@ -63,4 +63,13 @@ def parser_def_mgpu(desc):
                         help='Number of epochs to run training for.')
 
     return parser
+
+
+def remove_options(parser, options):
+    # ref: https://stackoverflow.com/a/36863647/3457624
+    for option in options:
+        for action in parser._actions:
+            if vars(action)['option_strings'][0] == option:
+                parser._handle_conflict_resolve(None, [(option, action)])
+                break
 

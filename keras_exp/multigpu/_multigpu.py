@@ -10,7 +10,13 @@
 from __future__ import print_function
 
 import sys
-from cStringIO import StringIO
+# import time
+
+try:
+    from cStringIO import StringIO
+except ImportError:
+    # Python 3 compat.
+    from io import StringIO
 
 from itertools import chain
 
@@ -19,6 +25,9 @@ from keras.layers.core import Lambda
 from keras.models import Model
 from keras.layers.merge import Concatenate  # , Average)
 # import keras.layers as KL
+
+from keras_exp.dataflow.keras_models import ModelDataflowMixin
+
 
 if KB.backend() == 'tensorflow':
     # Monkey patch Keras back-end to use Function with enqueue.
@@ -122,8 +131,8 @@ def all_sync_params(tower_params, devices, usenccl=True):
 # Tower-parallel:
 # ref: https://medium.com/autonomous-agents/multi-gpu-training-of-large-sparse-matrix-on-wide-neuralnetwork-cac7afc52ffe @IgnorePep8
 # ref: https://gist.github.com/vvpreetham/1379cc4e208ea33ce3e615067e92fc5e
-def make_parallel(serial_model, gdev_list, usenccl=False, syncopt=False,
-                  enqueue=False):
+def make_parallel(serial_model, gdev_list, ps_device='/cpu:0', usenccl=False,
+                  initsync=True, syncopt=False, enqueue=False):
     '''Given a keras [model], return an equivalent model which parallelizes
     the computation over [ngpus] GPUs.
 
@@ -137,10 +146,15 @@ def make_parallel(serial_model, gdev_list, usenccl=False, syncopt=False,
     :param list gdev_list: List of gpu devices i.e. ['/gpu:0', '/gpu:1', ...]
         Use function get_available_gpus to get the list of available gpus.
 
+    :param str ps_device: Parameter server device to use.
+
     :param bool usenccl: Use the contrib.nccl Tensorflow library for initial
         parameter synchronization and gradients averaging. Note, the model's
         usenccl option overrides the optimizers usenccl option.
         Default: False
+
+    :param bool initsync: Synchronize initial Variables i.e. weights,
+        biases, etc. Default: True
 
     :param bool syncopt: Synchronize gradients. Requires a multi-gpu optimizer.
         Default: False
@@ -161,7 +175,9 @@ def make_parallel(serial_model, gdev_list, usenccl=False, syncopt=False,
         return serial_model  # model_creator()
 
     return ModelMGPU(serial_model=serial_model, gdev_list=gdev_list,
-                     enqueue=enqueue, usenccl=usenccl, syncopt=syncopt)
+                     ps_device=ps_device,
+                     enqueue=enqueue, usenccl=usenccl,
+                     initsync=initsync, syncopt=syncopt)
 
 
 # def stage(tensors):
@@ -181,7 +197,7 @@ def make_parallel(serial_model, gdev_list, usenccl=False, syncopt=False,
 #     return put_op, get_tensors
 
 
-class ModelMGPU(Model):
+class ModelMGPU(ModelDataflowMixin, Model):
     '''Override load and save methods of the multi-gpu model. The load and
     save should correspond to the serial model's load and save.
     If there are other idiosyncracies to handle for multi-gpu model case then
@@ -203,12 +219,17 @@ class ModelMGPU(Model):
         Use function get_available_gpus to get the list of available gpus.
         REQUIRED.
 
+    :param str ps_device: Parameter server device to use.
+
     :param bool usenccl: Use the contrib.nccl Tensorflow library for initial
         parameter synchronization and gradients averaging. Note, the models
         usenccl option overrides the optimizers usenccl option.
         Default: False
         Raises RuntimeError if specified True and a non-multi-gpu optimizer is
         passed during compile stage.
+
+    :param bool initsync: Synchronize initial Variables i.e. weights,
+        biases, etc. Default: True
 
     :param bool syncopt: Synchronize gradients. Requires a multi-gpu optimizer.
         Default: False
@@ -250,6 +271,8 @@ class ModelMGPU(Model):
         mname = kwargs.pop('name', self._smodel.name)
         kwargs['name'] = mname
 
+        self._ps_device = kwargs.pop('ps_device', '/cpu:0')
+        self._initsync = kwargs.pop('initsync', True)
         self._usenccl = kwargs.pop('usenccl', False)
         self._syncopt = kwargs.pop('syncopt', False)
         self._enqueue = kwargs.pop('enqueue', False)
@@ -322,7 +345,7 @@ class ModelMGPU(Model):
             # when averaging gradients. Maybe insure ahead of time that the
             # batch_size is evenly divisible by number of GPUs, or maybe don't
             # use the last slice.
-            with tf.device('/cpu:0'):
+            with tf.device(self._ps_device):
                 slices = []  # multi-input case
                 for ix, x in enumerate(model.inputs):
                     slice_g = Lambda(
@@ -364,7 +387,7 @@ class ModelMGPU(Model):
 
                 self._tower_params.append(params)
 
-        with tf.device('/cpu:0'):
+        with tf.device(self._ps_device):
             merged = Concatenate(axis=0)(towers)
             # print('MERGED: {}'.format(merged))  # DEBUG
 
@@ -382,11 +405,8 @@ class ModelMGPU(Model):
         :override compile: Override Model.compile method to check for options
             that the optimizer is multi-gpu enabled, and synchronize initial
             variables.
-
-        :param bool initsync: Synchronize initial Variables i.e. weights,
-            biases, etc. Default: True
         '''
-        initsync = kwargs.pop('initsync', True)
+        initsync = self._initsync
         usenccl = self._usenccl
 
         opt = kwargs['optimizer']
@@ -405,9 +425,9 @@ class ModelMGPU(Model):
         super(ModelMGPU, self).compile(*args, **kwargs)
 
         if initsync:
-            self._initsync()
+            self._run_initsync()
 
-    def _initsync(self):
+    def _run_initsync(self):
         # tparams = [list(chain(*tp)) for tp in self._tower_params]
         tparams = self._tower_params
 
