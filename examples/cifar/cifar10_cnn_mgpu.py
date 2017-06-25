@@ -21,6 +21,7 @@ import threading
 
 from parser_common import parser_def_mgpu
 
+# from keras.utils.data_utils import get_file
 from keras.utils import to_categorical
 from keras.datasets import cifar10
 from keras.preprocessing.image import ImageDataGenerator
@@ -58,6 +59,9 @@ def parser_(desc):
 
     parser.add_argument('--logdevp', action='store_true', default=False,
                         help='S|Log device placement in Tensorflow.\n')
+
+    parser.add_argument('--datadir', default=SUPPRESS,
+                        help='Data directory with Cifar10 dataset.')
 
     args = parser.parse_args()
 
@@ -156,6 +160,41 @@ def make_model_small(inshape, num_classes, weights_file=None):
     return model
 
 
+def cifar10_load_data(path):
+    """Loads CIFAR10 dataset.
+
+    # Returns
+        Tuple of Numpy arrays: `(x_train, y_train), (x_test, y_test)`.
+    """
+    dirname = 'cifar-10-batches-py'
+    # origin = 'http://www.cs.toronto.edu/~kriz/cifar-10-python.tar.gz'
+    # path = get_file(dirname, origin=origin, untar=True)
+    path_ = os.path.join(path, dirname)
+
+    num_train_samples = 50000
+
+    x_train = np.zeros((num_train_samples, 3, 32, 32), dtype='uint8')
+    y_train = np.zeros((num_train_samples,), dtype='uint8')
+
+    for i in range(1, 6):
+        fpath = os.path.join(path_, 'data_batch_' + str(i))
+        data, labels = cifar10.load_batch(fpath)
+        x_train[(i - 1) * 10000: i * 10000, :, :, :] = data
+        y_train[(i - 1) * 10000: i * 10000] = labels
+
+    fpath = os.path.join(path_, 'test_batch')
+    x_test, y_test = cifar10.load_batch(fpath)
+
+    y_train = np.reshape(y_train, (len(y_train), 1))
+    y_test = np.reshape(y_test, (len(y_test), 1))
+
+    if KB.image_data_format() == 'channels_last':
+        x_train = x_train.transpose(0, 2, 3, 1)
+        x_test = x_test.transpose(0, 2, 3, 1)
+
+    return (x_train, y_train), (x_test, y_test)
+
+
 def main(argv=None):
     '''
     '''
@@ -181,8 +220,12 @@ def main(argv=None):
 
     logdevp = args.logdevp
 
+    datadir = getattr(args, 'datadir', None)
+
     # The data, shuffled and split between train and test sets:
-    (x_train, y_train), (x_test, y_test) = cifar10.load_data()
+    # (x_train, y_train), (x_test, y_test) = cifar10.load_data()
+    (x_train, y_train), (x_test, y_test) = cifar10_load_data(datadir) \
+        if datadir is not None else cifar10.load_data()
     print(x_train.shape[0], 'train samples')
     print(x_test.shape[0], 'test samples')
 
