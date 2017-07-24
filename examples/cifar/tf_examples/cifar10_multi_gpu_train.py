@@ -14,7 +14,7 @@
 # limitations under the License.
 # ==============================================================================
 
-"""A binary to train CIFAR-10 using multiple GPU's with synchronous updates.
+"""A binary to train CIFAR-10 using multiple GPUs with synchronous updates.
 
 Accuracy:
 cifar10_multi_gpu_train.py achieves ~86% accuracy after 100K steps (256
@@ -63,19 +63,17 @@ tf.app.flags.DEFINE_boolean('log_device_placement', False,
                             """Whether to log device placement.""")
 
 
-def tower_loss(scope):
+def tower_loss(scope, images, labels):
   """Calculate the total loss on a single tower running the CIFAR model.
 
   Args:
     scope: unique prefix string identifying the CIFAR tower, e.g. 'tower_0'
+    images: Images. 4D tensor of shape [batch_size, height, width, 3].
+    labels: Labels. 1D tensor of shape [batch_size].
 
   Returns:
      Tensor of shape [] containing the total loss for a batch of data
   """
-  # ref: https://github.com/tensorflow/models/issues/1264
-  with tf.device('/cpu:0'):  # FIXME: TRICK
-    # Get images and labels for CIFAR-10.
-    images, labels = cifar10.distorted_inputs()
 
   # Build inference Graph.
   logits = cifar10.inference(images)
@@ -129,7 +127,6 @@ def average_gradients(tower_grads):
     # Average over the 'tower' dimension.
     grad = tf.concat(axis=0, values=grads)
     grad = tf.reduce_mean(grad, 0)
-    # grad = g
 
     # Keep in mind that the Variables are redundant because they are shared
     # across towers. So .. we will just return the first tower's pointer to
@@ -164,16 +161,26 @@ def train():
     # Create an optimizer that performs gradient descent.
     opt = tf.train.GradientDescentOptimizer(lr)
 
+    # Get images and labels for CIFAR-10.
+    # Force input pipeline to CPU:0 to avoid operations sometimes ending up on
+    # GPU and resulting in a slow down.
+    with tf.device('/cpu:0'):
+      images, labels = cifar10.distorted_inputs()
+    # images, labels = cifar10.distorted_inputs()
+    batch_queue = tf.contrib.slim.prefetch_queue.prefetch_queue(
+          [images, labels], capacity=2 * FLAGS.num_gpus)
     # Calculate the gradients for each model tower.
     tower_grads = []
     with tf.variable_scope(tf.get_variable_scope()):
       for i in xrange(FLAGS.num_gpus):
         with tf.device('/gpu:%d' % i):
           with tf.name_scope('%s_%d' % (cifar10.TOWER_NAME, i)) as scope:
+            # Dequeues one batch for the GPU
+            image_batch, label_batch = batch_queue.dequeue()
             # Calculate the loss for one tower of the CIFAR model. This function
             # constructs the entire CIFAR model but shares the variables across
             # all towers.
-            loss = tower_loss(scope)
+            loss = tower_loss(scope, image_batch, label_batch)
 
             # Reuse variables for the next tower.
             tf.get_variable_scope().reuse_variables()

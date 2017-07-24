@@ -1,4 +1,12 @@
 '''
+When mixing in these classes requires tensorpack (or tensorpack's dependencies
+such as ZeroMQ) to be installed.
+
+I did not observe any speedup from tensorpack's dataflow. Perhaps someone can
+fix my implementation. In the meantime it's there for referece. Corresponding
+example: cifar10_cnn_mgpu_dflow.py
+
+@author: avolkov
 '''
 from keras.legacy import interfaces
 from keras import callbacks as cbks

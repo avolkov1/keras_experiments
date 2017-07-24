@@ -21,6 +21,8 @@ import threading
 
 from parser_common import parser_def_mgpu
 
+import tensorflow as tf
+
 # from keras.utils.data_utils import get_file
 from keras.utils import to_categorical
 from keras.datasets import cifar10
@@ -240,9 +242,7 @@ def main(argv=None):
 
     callbacks = None
 
-    if _DEVPROF or logdevp:
-        import tensorflow as tf
-
+    if _DEVPROF or logdevp:  # or True:
         # Setup Keras session using Tensorflow
         config = tf.ConfigProto(allow_soft_placement=True,
                                 log_device_placement=True)
@@ -251,6 +251,7 @@ def main(argv=None):
         KB.set_session(tfsess)
 
     print(x_train.shape, 'train shape')
+    # with tf.device('/cpu:0'):
     model_init = make_model(x_train.shape, num_classes,
                             filepath if checkpt_flag else None)
 
@@ -262,11 +263,13 @@ def main(argv=None):
                                      save_best_only=True, mode='max')
         callbacks = [checkpoint]
 
+    lr = 0.0001
     if mgpu > 1 or mgpu == -1:
         gpus_list = get_available_gpus(mgpu)
         ngpus = len(gpus_list)
         print('Using GPUs: {}'.format(', '.join(gpus_list)))
         batch_size = batch_size * ngpus  #
+        lr = lr * ngpus
         # batch_size = 40000  # split over four devices works fine no grad avg
         # batch_size = 25000  # split over four devices works fine w/ grad avg
 
@@ -277,9 +280,9 @@ def main(argv=None):
         #                   syncopt=syncopt, usenccl=usenccl, enqueue=enqueue)
         print_mgpu_modelsummary(model)
         if not syncopt:
-            opt = RMSprop(lr=0.0001, decay=1e-6)
+            opt = RMSprop(lr=lr, decay=1e-6)
         else:
-            opt = RMSPropMGPU(lr=0.0001, decay=1e-6, gdev_list=gpus_list)
+            opt = RMSPropMGPU(lr=lr, decay=1e-6, gdev_list=gpus_list)
 
     else:
         model = model_init
@@ -288,7 +291,7 @@ def main(argv=None):
         print(model.summary())
 
         # initiate RMSprop optimizer
-        opt = RMSprop(lr=0.0001, decay=1e-6)
+        opt = RMSprop(lr=lr, decay=1e-6)
 
     # Let's train the model using RMSprop
     model.compile(loss='categorical_crossentropy',
