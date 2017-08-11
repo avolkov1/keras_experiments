@@ -42,7 +42,7 @@ def parser_(desc):
     parser = parser_def_mgpu(desc)
     remove_options(parser, ['--mgpu', '--nccl'])
 
-    checkptfile = 'cifar10_cnn_distrib.weights.best.hdf5'
+    checkptfile = 'cifar10_cnn_distrib_v2.weights.best.hdf5'
     parser.add_argument(
         '--checkpt', action='store', nargs='?',
         const=checkptfile, default=SUPPRESS,
@@ -150,12 +150,8 @@ def main(argv=None):
         # server.join()
         cmgr_facade.join(server)
 
-    # Once the server is started everything but the chief worker can join
-    # the server and wait to process/service graph computations. Chief pushes
-    # the compute graph. COMPARE TO: cifar10_cnn_distrib_v2_slurm
-    if not is_chief:
-        # JOIN WORKERS EXCEPT FOR CHIEF
-        cmgr_facade.join(server)
+    ps_device = cmgr_facade.get_mypsdevice()
+    print('MYPS_DEVICE: {}'.format(ps_device))  # DEBUG
 
     # sleep(2)  # Have the chief wait just in case. Occasionally get errors.
 
@@ -168,8 +164,15 @@ def main(argv=None):
     wgdev_list = cmgr_facade.get_allworkers_devlist(ngpus)
     # If 2 workers ea. w/ 4 devices then nworker_devices_total == 2 * 4 = 8
     # If 4 workers ea. w/ 1 devices then nworker_devices_total == 4 * 1 = 4
-    nworker_devices_total = len(wgdev_list)
-    batch_size = batch_size * nworker_devices_total
+    # nworker_devices_total = len(wgdev_list)
+
+    # Number of workers, not devices. Each worker can have multiple devices.
+    num_workers = cmgr_facade.num_workers
+
+    # List of devices associated with current worker/task.
+    mydevlist = cmgr_facade.get_mydevlist(ngpus)
+    nmydevs = len(mydevlist)
+    batch_size = batch_size * nmydevs
 
     # ------------------------------------ Data loading and basic preprocessing
     # The data, shuffled and split between train and test sets:
@@ -184,10 +187,30 @@ def main(argv=None):
     x_test /= 255
 
     nsamples = x_train.shape[0]
-    steps_per_epoch = nsamples // batch_size
+    steps_per_epoch = (nsamples // num_workers) // batch_size
 
-    print(x_train.shape[0], 'train samples')
-    print(x_test.shape[0], 'test samples')
+    # NOTE: Naive dataset below split. With such a naive approach the random
+    #     sampling gets screwed up. The convergence rate is slower as a
+    #     result (hence defeats the purpose of scaling since more iterations
+    #     are required when using more nodes), and if scaling to very many
+    #     nodes might not converge. Instead using a generator that
+    #     randomly chooses the samples for "mypart". Maybe implement a
+    #     custom ImageDataGenerator for distributed case.
+    # split train dataset for myrank
+    # mytaskid = mypart = cmgr_facade.mytask_id
+    # nn = x_train.shape[0] // num_workers
+    # i1 = mypart * nn
+    # if mypart == num_workers - 1:
+    #     x_train = x_train[i1:, ...]
+    #     y_train = y_train[i1:, ...]
+    # else:
+    #     i2 = (mypart + 1) * nn
+    #     x_train = x_train_[i1:i2, ...]
+    #     y_train = y_train[i1:i2, ...]
+    # print('TASK {}: train samples {}'.format(mytaskid, x_train.shape[0]))
+    # print('TASK {}: test samples {}'.format(mytaskid, x_test.shape[0]))
+    # nsamples = x_train.shape[0]
+    # steps_per_epoch = nsamples // batch_size
 
     # --------------------------------------------- Setup model and parallelize
     def _load_fn(unused_op):
@@ -198,13 +221,9 @@ def main(argv=None):
     ps_strategy = \
         tf.contrib.training.GreedyLoadBalancingStrategy(num_ps, _load_fn)
 
-    # ps_device = tf.DeviceSpec(job=JobType.ps, device_type=DevType.cpu,
-    #                           device_index=0).to_string()
-
     rdsetter = tf.train.replica_device_setter(
         cluster=cspec,
-        ps_strategy=ps_strategy
-        # ps_device=ps_device,  # '/job:ps/cpu:0'  # seems to work
+        ps_strategy=ps_strategy,
     )
     with tf.device(rdsetter):
         model_init = make_model(
@@ -212,22 +231,29 @@ def main(argv=None):
             filepath if checkpt_flag else None
         )
 
+    # if using checkpointing callback enable it on chief or use unique
+    # filepath for each worker task.
     callbacks = None
-    if checkpt_flag:
+    if checkpt_flag and is_chief:
         checkpoint = ModelCheckpoint(filepath, monitor='val_acc', verbose=1,
                                      save_best_only=True, mode='max')
         callbacks = [checkpoint]
 
-    print('\n\tCLUSTER_SPEC_DICT: {}\n\tWGDEV_LIST: {}\n'
-          .format(cmgr_facade.clusterspec_dict,
-                  [dev.to_string() for dev in wgdev_list]))  # DEBUG
+    if is_chief:
+        print('\n\tCLUSTER_SPEC_DICT: {}\n\tWGDEV_LIST: {}\n'
+              .format(cmgr_facade.clusterspec_dict,
+                      [dev.to_string() for dev in wgdev_list]))  # DEBUG
+
+    print('\n\tMYWGDEV_LIST: {}\n'
+          .format([dev.to_string() for dev in mydevlist]))  # DEBUG
 
     # Data-Parallelize the model via function or class.
-    model = make_parallel(model_init, wgdev_list)
+    model = make_parallel(model_init, mydevlist, ps_device=ps_device)
     print_mgpu_modelsummary(model)
 
     # ------------------------------------------------------------ Run training
-    lr = 0.0001 * nworker_devices_total
+    lr = 0.0001 * nmydevs
+    # lr = 0.0001 * nworker_devices_total
     opt = RMSprop(lr=lr, decay=1e-6)
 
     # Let's train the model using RMSprop
@@ -237,12 +263,22 @@ def main(argv=None):
 
     if not data_augmentation:
         print('Not using data augmentation.')
-        model.fit(x_train, y_train,
-                  batch_size=batch_size,
-                  epochs=epochs,
-                  validation_data=(x_test, y_test),
-                  shuffle=True,
-                  callbacks=callbacks)
+        # model.fit(x_train, y_train,
+        #           batch_size=batch_size,
+        #           epochs=epochs,
+        #           validation_data=(x_test, y_test),
+        #           shuffle=True,
+        #           callbacks=callbacks)  # verbose=is_chief)
+
+        datagen = ImageDataGenerator()
+        datagen.fit(x_train)
+        # Fit the model on the batches generated by datagen.flow().
+        model.fit_generator(datagen.flow(x_train, y_train,
+                                         batch_size=batch_size),
+                            steps_per_epoch=steps_per_epoch,
+                            epochs=epochs,
+                            validation_data=(x_test, y_test),
+                            callbacks=callbacks)
 
     else:
         print('Using real-time data augmentation.')
@@ -276,6 +312,10 @@ def main(argv=None):
                             callbacks=callbacks)
 
     # ------------------------------------------------------------- STOP SERVER
+    if not is_chief:
+        # JOIN WORKERS EXCEPT FOR CHIEF
+        cmgr_facade.join(server)
+
     cmgr_facade.stop_chief(server)
 
 

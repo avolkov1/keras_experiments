@@ -9,8 +9,7 @@ import traceback
 import tensorflow as tf
 
 from keras_exp.multigpu import get_available_gpus
-from keras_exp.distrib import (
-    JobType, DevType, TFClusterManagerFacade)
+from keras_exp.distrib import TFClusterManagerFacade  # JobType, DevType
 
 
 __all__ = ('test',)
@@ -62,7 +61,8 @@ def test(cluster_parser_spec):
     #       .format(  # DEBUG
     #           cspec_dict, job_type, task_id, server.target, is_chief))
 
-    server = cmgr_facade.get_server(config)
+    # TF 1.2.x RDMA: specify protocol='grpc+verbs' in server below.
+    server = cmgr_facade.get_server(config)  # , protocol='grpc+verbs')
 
     # if job_type == JobType.ps:
     #     # JOIN PARAMETER SERVERS
@@ -94,7 +94,7 @@ def test(cluster_parser_spec):
     ngpus = len(gdev_list)
 
     #: :type mywgdev: tf.DeviceSpec
-    mywgdev, wgdev_list = cmgr_facade.get_workers_dev_list(ngpus)
+    wgdev_list = cmgr_facade.get_allworkers_devlist(ngpus)
     # print('\n\tCLUSTER_SPEC_DICT: {}\n\tWGDEV_LIST: {}\n'
     #       .format(cmgr_facade.clusterspec_dict,
     #               [dev.to_string() for dev in wgdev_list]))  # DEBUG
@@ -110,17 +110,14 @@ def test(cluster_parser_spec):
         sleep(2)  # Have the chief wait just in case. Occasionally get errors.
         # Perhaps implement a READY queue just like DONE queues.
 
-        ps_device = tf.DeviceSpec(job=JobType.ps,
-                                  device_type=DevType.cpu,
-                                  device_index=0).to_string()
+        # ps_device = tf.DeviceSpec(job=JobType.ps,
+        #                           device_type=DevType.cpu,
+        #                           device_index=0).to_string()
         # ps_device = '/job:ps/cpu:0'
         # print('PS_DEVICE: {}'.format(ps_device))  # DEBUG
         # TO USE REPLICA WITH tf.train.Supervisor DO NOT JOIN WORKERS ABOVE.
         # USING IT BELOW FOR PRINTING "Hello,..." IS NOT NECESSARY.
-        with tf.device(tf.train.replica_device_setter(
-                worker_device=mywgdev.to_string(),
-                ps_device=ps_device,
-                cluster=cluster_spec)):
+        with tf.device(tf.train.replica_device_setter(cluster=cluster_spec)):
             hello_tf = tf.constant("Hello, distributed TensorFlow!")
             result = sess.run(hello_tf)
             print('RESULT:\n{}\n'.format(result))

@@ -62,6 +62,10 @@ def parser_def_mgpu(desc):
     parser.add_argument('--epochs', type=int, default=200,
                         help='Number of epochs to run training for.')
 
+    parser.add_argument('--rdma', action='store_true', default=False,
+                        help='S|Use RDMA with Tensorflow. Requires that TF \n'
+                             'was compiled with RDMA support.\n')
+
     return parser
 
 
