@@ -287,9 +287,10 @@ class ModelMGPU(Model):
             raise RuntimeError('Number of gpus < 2. Require two or more GPUs '
                                'for multi-gpu model parallelization.')
 
-        model_ = model = self._smodel
+        model = self._smodel
+        noutputs = len(self._smodel.outputs)
         global_scope = tf.get_variable_scope()
-        towers = []
+        towers = [[] for _ in range(noutputs)]
         for idev, dev in enumerate(gdev_list):
             # TODO: The last slice could cause a gradient calculation outlier
             # when averaging gradients. Maybe insure ahead of time that the
@@ -326,20 +327,26 @@ class ModelMGPU(Model):
                 #     # SET STATE: Instance of serial model for checkpointing
                 #     self._smodel = model_  # for ability to checkpoint
 
-                modeltower = model_(slices)
-                towers.append(modeltower)
+                # Handle multi-output case
+                modeltower = model(slices)
+                if not isinstance(modeltower, list):
+                    modeltower = [modeltower]
+
+                for imt, mt in enumerate(modeltower):
+                    towers[imt].append(mt)
+                    params = mt.graph._collections['trainable_variables']
 
                 # params = model_.trainable_weights
                 # params = tf.get_collection(
                 #     tf.GraphKeys.TRAINABLE_VARIABLES, scope=var_scope.name)
-                params = modeltower.graph._collections['trainable_variables']
+                # params = modeltower.graph._collections['trainable_variables']
                 # print('PARAMS: {}'.format(params))  # DEBUG
 
                 self._tower_params.append(params)
 
         with tf.device(self._ps_device):
-            merged = Concatenate(axis=0)(towers)
-            # print('MERGED: {}'.format(merged))  # DEBUG
+            # merged = Concatenate(axis=0)(towers)
+            merged = [Concatenate(axis=0)(tw) for tw in towers]
 
         # self._enqueue_ops.append(tf.group(*gpucopy_ops))
         self._enqueue_ops += gpucopy_ops
