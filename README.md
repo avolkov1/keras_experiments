@@ -6,7 +6,8 @@ Experimental Keras libraries and examples.
 * [mnist\_tfrecord\_mgpu.py](examples/mnist/mnist_tfrecord_mgpu.py)
 
     Mnist example with multi-GPU data parallelism distribution using TFRecords
-    and TF queue pipline to run Keras. Run it as follows:
+    and TF queue pipeline to run Keras. Requires Keras v 2.0.8.
+    Run it as follows:
     ```bash
     cd mnist/examples
     CUDA_VISIBLE_DEVICES=0 python mnist_tfrecord_mgpu.py  # 1 - GPU
@@ -16,7 +17,7 @@ Experimental Keras libraries and examples.
     improvements. I will try to add a corresponding Cifar10 example with this
     paradigm.
     Original implementation of this can be found here:
-    [https://github.com/fchollet/keras/pull/7075](https://github.com/fchollet/keras/pull/7075)
+    [https://github.com/fchollet/keras/blob/master/examples/mnist_tfrecord.py](https://github.com/fchollet/keras/blob/master/examples/mnist_tfrecord.py)
 
 
 * [cifar10\_cnn\_mgpu.py](examples/cifar/cifar10_cnn_mgpu.py)

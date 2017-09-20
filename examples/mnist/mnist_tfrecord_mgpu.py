@@ -1,6 +1,8 @@
-# https://stackoverflow.com/questions/42184863/how-do-you-make-tensorflow-keras-fast-with-a-tfrecord-dataset
 '''
-MNIST dataset with TensorFlow TFRecords.
+MNIST dataset with TensorFlow TFRecords. Refer to:
+    https://github.com/fchollet/keras/blob/master/examples/mnist_tfrecord.py
+
+This is an implementation for multi-GPU systems.
 
 Call this example:
     # best achieved performance with 2 GPUs
@@ -20,11 +22,11 @@ Call this example:
     # due to startup time being longer for multigpu case, but the training
     # portion is faster with 2 GPUs. Running on P100s 50 epochs:
     #     nGPUs | training (sec). | walltime (sec.)
-    #         1 | ~ 4.3           | ~ 11
-    #         2 | ~ 3.4           | ~ 14
+    #         1 | ~ 2             | ~ 16
+    #         2 | ~ 1             | ~ 12
     #
     # Degrades with > 2 GPUs because the mnist model is not significant enough
-    # to stress the computing of the GPUs so the startup/comm. overhead is
+    # to stress the computing of the GPUs so the startup/comm. Overhead is
     # greater than speedup achieved due to data-parallelism.
 
 Using TFRecord queues with Keras can be a significant performance booster. When
@@ -32,13 +34,11 @@ the model and batch sizes are signifcantly large, using multigpu with TFRecord
 queue can give additional performance boost to Keras.
 
 '''
-import os
 import time
 
 import numpy as np
 
 import tensorflow as tf
-from tensorflow.python.ops import data_flow_ops
 from keras import backend as KB
 from keras.models import Model
 from keras.layers import (
@@ -48,168 +48,21 @@ from keras.optimizers import RMSprop
 from keras.models import Sequential
 import keras.layers as KL
 
-from keras.objectives import categorical_crossentropy
-from keras.utils import np_utils
-from keras.utils.generic_utils import Progbar
+from keras.callbacks import ModelCheckpoint
 
-from keras.datasets import mnist
+from keras.utils import to_categorical
+
+from tensorflow.contrib.learn.python.learn.datasets import mnist
 
 from keras_exp.multigpu import (
-    get_available_gpus, make_parallel, print_mgpu_modelsummary, ModelMGPU)
-
-from keras_exp.mixin_models.tfrecord import (
-    ModelTFRecordMixin, ModelCheckpointTFRecord)
-
-
-class Model_TFrecord(ModelTFRecordMixin, Model):
-    pass
-
-
-class ModelMGPU_TFrecord(ModelTFRecordMixin, ModelMGPU):
-    pass
+    get_available_gpus, make_parallel, print_mgpu_modelsummary)
 
 
 if KB.backend() != 'tensorflow':
     raise RuntimeError('This example can only run with the '
-                       'TensorFlow backend for the time being, '
+                       'TensorFlow backend, '
                        'because it requires TFRecords, which '
                        'are not supported on other platforms.')
-
-
-def images_to_tfrecord(images, labels, filename):
-    def _int64_feature(value):
-        return tf.train.Feature(int64_list=tf.train.Int64List(value=[value]))
-
-    def _bytes_feature(value):
-        return tf.train.Feature(bytes_list=tf.train.BytesList(value=[value]))
-
-    """ Save data into TFRecord """
-    if not os.path.isfile(filename):
-        num_examples = images.shape[0]
-
-        rows = images.shape[1]
-        cols = images.shape[2]
-        depth = images.shape[3]
-
-        print('Writing', filename)
-        writer = tf.python_io.TFRecordWriter(filename)
-        for index in range(num_examples):
-            image_raw = images[index].tostring()
-            example = tf.train.Example(features=tf.train.Features(feature={
-                'height': _int64_feature(rows),
-                'width': _int64_feature(cols),
-                'depth': _int64_feature(depth),
-                'label': _int64_feature(int(labels[index])),
-                'image_raw': _bytes_feature(image_raw)}))
-            writer.write(example.SerializeToString())
-        writer.close()
-    else:
-        print('tfrecord %s already exists' % filename)
-
-
-def read_and_decode_recordinput(
-        tf_glob, one_hot=True, classes=None, is_train=None,
-        batch_shape=[1000, 28, 28, 1], parallelism=1):
-    """ Return tensor to read from TFRecord """
-    print('\nCreating graph for loading {} TFRecords...'.format(tf_glob))
-    with tf.variable_scope("TFRecords"):
-        record_input = data_flow_ops.RecordInput(
-            tf_glob, batch_size=batch_shape[0], parallelism=parallelism)
-        records_op = record_input.get_yield_op()
-        records_op = tf.split(records_op, batch_shape[0], 0)
-        records_op = [tf.reshape(record, []) for record in records_op]
-        progbar = Progbar(len(records_op))
-
-        images = []
-        labels = []
-        for i, serialized_example in enumerate(records_op):
-            progbar.update(i)
-            with tf.variable_scope("parse_images", reuse=True):
-                features = tf.parse_single_example(
-                    serialized_example,
-                    features={
-                        'label': tf.FixedLenFeature([], tf.int64),
-                        'image_raw': tf.FixedLenFeature([], tf.string),
-                    })
-                img = tf.decode_raw(features['image_raw'], tf.uint8)
-                img.set_shape(batch_shape[1] * batch_shape[2])
-                img = tf.reshape(img, [1] + batch_shape[1:])
-
-                img = tf.cast(img, tf.float32) * (1. / 255) - 0.5
-
-                label = tf.cast(features['label'], tf.int32)
-                if one_hot and classes:
-                    label = tf.one_hot(label, classes)
-
-                images.append(img)
-                labels.append(label)
-
-        progbar.update(i + 1)
-
-        images = tf.parallel_stack(images, 0)
-        labels = tf.parallel_stack(labels, 0)
-        images = tf.cast(images, tf.float32)
-
-        images = tf.reshape(images, shape=batch_shape)
-
-        return images, labels
-
-
-def read_and_decode_recordinput2(
-        tf_glob, one_hot=True, classes=None, is_train=None,
-        batch_shape=[1000, 28, 28, 1], parallelism=1):
-    '''Return tensor to read from TFRecord'''
-    filename_queue = tf.train.string_input_producer([tf_glob])
-    reader = tf.TFRecordReader()
-    _, serialized_example = reader.read(filename_queue)
-    features = tf.parse_single_example(
-        serialized_example,
-        features={
-            'label': tf.FixedLenFeature([], tf.int64),
-            'image_raw': tf.FixedLenFeature([], tf.string),
-        })
-    # You can do more image distortion here for training data
-    img = tf.decode_raw(features['image_raw'], tf.uint8)
-    img.set_shape([batch_shape[1] * batch_shape[2]])
-    img = tf.reshape(img, batch_shape[1:])
-
-    img = tf.cast(img, tf.float32) * (1. / 255) - 0.5
-    # img = tf.cast(img, tf.float32) * (1. / 255)
-
-    label = tf.cast(features['label'], tf.int32)
-    if one_hot and classes:
-        label = tf.one_hot(label, classes)
-
-    batch_size = batch_shape[0]
-    if is_train:
-        x_train_batch, y_train_batch = tf.train.shuffle_batch(
-            [img, label],
-            batch_size=batch_size,
-            capacity=2000,
-            min_after_dequeue=1000,
-            num_threads=parallelism)  # set the number of threads here
-    else:
-        x_train_batch, y_train_batch = tf.train.batch(
-            [img, label],
-            batch_size=batch_size,
-            capacity=2000,
-            num_threads=parallelism)  # set the number of threads here
-
-    return x_train_batch, y_train_batch
-
-    # num_gpus = 1
-    # batch_queue = tf.contrib.slim.prefetch_queue.prefetch_queue(
-    #     [x_train_batch, y_train_batch], capacity=2 * num_gpus)
-    #
-    # image_batch, label_batch = batch_queue.dequeue()
-    # return image_batch, label_batch
-
-
-def save_mnist_as_tfrecord(X_train, y_train, X_test, y_test):
-    images_to_tfrecord(images=X_train, labels=y_train,
-                       filename='train.mnist.tfrecord')
-    images_to_tfrecord(images=X_test, labels=y_test,
-                       filename='test.mnist.tfrecord')
 
 
 def cnn_layers_list(nclasses):
@@ -236,6 +89,7 @@ def cnn_layers(x_train_input, nclasses):
 
 
 def make_model(x_train_input, nclasses):
+    '''Non-functional model definition.'''
     model = Sequential()
     model.add(KL.InputLayer(input_tensor=x_train_input))
     ll = cnn_layers_list(nclasses)
@@ -246,93 +100,107 @@ def make_model(x_train_input, nclasses):
 
 
 def main():
+    # user options
+    batch_size = 128
+    val_in_train = False
+    use_model_checkpt = False
+
+    # demo processing
     sess = tf.Session()
     KB.set_session(sess)
 
-    (X_train, y_train), (X_test, y_test) = mnist.load_data()
-    X_train = X_train[..., np.newaxis]
-    X_test = X_test[..., np.newaxis]
-    save_mnist_as_tfrecord(X_train, y_train, X_test, y_test)
-    print('X_train shape: {}'.format(X_train.shape))
-
     gdev_list = get_available_gpus()
     ngpus = len(gdev_list)
+    batch_size = batch_size * ngpus
 
-    batch_size = 100 * ngpus
+    data = mnist.load_mnist()
+    X_train = data.train.images
+    X_test = data.test.images
     train_samples = X_train.shape[0]  # 60000
-    height_nrows = X_train.shape[1]  # 28
-    width_ncols = X_train.shape[2]  # 28
+    test_samples = X_test.shape[0]  # 10000
+    height_nrows = 28
+    width_ncols = 28
     batch_shape = [batch_size, height_nrows, width_ncols, 1]
-    epochs = 50
+    epochs = 5
     steps_per_epoch = train_samples / batch_size
+    validations_steps = test_samples / batch_size
     nclasses = 10
-    parallelism = 10  # threads for tf queue readers
 
-    def rdi():
-        # x_train_batch, y_train_batch = read_and_decode_recordinput2(
-        x_train_batch, y_train_batch = read_and_decode_recordinput(
-            './train.mnist.tfrecord',
-            one_hot=True,
-            classes=nclasses,
-            is_train=True,
-            batch_shape=batch_shape,
-            parallelism=parallelism)
+    # The capacity variable controls the maximum queue size
+    # allowed when prefetching data for training.
+    capacity = 10000
 
-        return x_train_batch, y_train_batch
+    # min_after_dequeue is the minimum number elements in the queue
+    # after a dequeue, which ensures sufficient mixing of elements.
+    min_after_dequeue = 3000
 
-    with tf.device('/cpu:0'):
-        x_train_batch, y_train_batch = rdi()
+    # If `enqueue_many` is `False`, `tensors` is assumed to represent a
+    # single example.  An input tensor with shape `[x, y, z]` will be output
+    # as a tensor with shape `[batch_size, x, y, z]`.
+    #
+    # If `enqueue_many` is `True`, `tensors` is assumed to represent a
+    # batch of examples, where the first dimension is indexed by example,
+    # and all members of `tensors` should have the same size in the
+    # first dimension.  If an input tensor has shape `[*, x, y, z]`, the
+    # output will have shape `[batch_size, x, y, z]`.
+    enqueue_many = True
 
-    # x_test_batch, y_test_batch = read_and_decode_recordinput2(
-    x_test_batch, y_test_batch = read_and_decode_recordinput(
-        './test.mnist.tfrecord',
-        one_hot=True,
-        classes=nclasses,
-        is_train=False,
-        batch_shape=batch_shape,
-        parallelism=parallelism)
+    x_train_batch, y_train_batch = tf.train.shuffle_batch(
+        tensors=[data.train.images, data.train.labels.astype(np.int32)],
+        batch_size=batch_size,
+        capacity=capacity,
+        min_after_dequeue=min_after_dequeue,
+        enqueue_many=enqueue_many,
+        num_threads=8)
 
-    x_batch_shape = x_train_batch.get_shape().as_list()
-    y_batch_shape = y_train_batch.get_shape().as_list()
+    x_train_batch = tf.cast(x_train_batch, tf.float32)
+    x_train_batch = tf.reshape(x_train_batch, shape=batch_shape)
 
-    x_train_input = Input(tensor=x_train_batch, batch_shape=x_batch_shape)
-    y_train_in_out = Input(tensor=y_train_batch, batch_shape=y_batch_shape,
-                           name='y_labels')
+    y_train_batch = tf.cast(y_train_batch, tf.int32)
+    y_train_batch = tf.one_hot(y_train_batch, nclasses)
 
-    if ngpus < 2:
-        # x_train_out = cnn_layers(x_train_input, nclasses)
-        # train_model = Model_TFrecord(inputs=[x_train_input],
-        #                              outputs=[x_train_out])
-        model_init = make_model(x_train_input, nclasses)
-        x_train_out = model_init.output
-        train_model = Model_TFrecord(inputs=[x_train_input],
-                                     outputs=[x_train_out])
-    else:
-        model_init = make_model(x_train_input, nclasses)
-        train_model = make_parallel(model_init, gdev_list,
-                                    model_class=ModelMGPU_TFrecord)
-        x_train_out = train_model.output
+    x_train_input = Input(tensor=x_train_batch)
 
-    # cce = categorical_crossentropy(y_train_batch, x_train_out)  # works too
-    cce = categorical_crossentropy(y_train_in_out, x_train_out)
-    train_model.add_loss(cce)
+    x_test_batch, y_test_batch = tf.train.batch(
+        tensors=[data.test.images, data.test.labels.astype(np.int32)],
+        batch_size=batch_size,
+        capacity=capacity,
+        enqueue_many=enqueue_many,
+        num_threads=8)
 
-    lr = 0.001 * ngpus
-    opt = RMSprop(lr=lr)
-    train_model.compile(optimizer=opt,  # 'rmsprop',
-                        loss=None,
-                        metrics=['accuracy'])
+    # I like the non-functional definition of model more.
+    # model_init = make_model(x_train_input, nclasses)
+    # x_train_out = model_init.output
+    # train_model = Model(inputs=[x_train_input], outputs=[x_train_out])
+
+    x_train_out = cnn_layers(x_train_input, nclasses)
+    train_model = Model(inputs=[x_train_input], outputs=[x_train_out])
+    if ngpus > 1:
+        train_model = make_parallel(train_model, gdev_list)
+
+    lr = 2e-3 * ngpus
+    train_model.compile(optimizer=RMSprop(lr=lr, decay=1e-5),
+                        loss='categorical_crossentropy',
+                        metrics=['accuracy'],
+                        target_tensors=[y_train_batch])
+
     if ngpus > 1:
         print_mgpu_modelsummary(train_model)
     else:
         train_model.summary()
 
     # Callbacks
-    checkpoint = ModelCheckpointTFRecord(
-        'saved_wt.h5', monitor='val_loss', verbose=0,
-        save_best_only=True,
-        save_weights_only=True)
-    callbacks = []  # [checkpoint]  # []
+    if use_model_checkpt:
+        mon = 'val_acc' if val_in_train else 'acc'
+        checkpoint = ModelCheckpoint(
+            'saved_wt.h5', monitor=mon, verbose=0,
+            save_best_only=True,
+            save_weights_only=True)
+        checkpoint = [checkpoint]
+    else:
+        checkpoint = []
+
+    callbacks = checkpoint
     # Training slower with callback. Multigpu slower with callback during
     # training than 1 GPU. Again, mnist is too trivial of a model and dataset
     # to benchmark or stress GPU compute capabilities. I set up this example
@@ -346,10 +214,14 @@ def main():
     # Start the queue runners.
     tf.train.start_queue_runners(sess=sess)
 
+    # Fit the model using data from the TFRecord data tensors.
+    coord = tf.train.Coordinator()
+    threads = tf.train.start_queue_runners(sess, coord)
+
     start_time = time.time()
-    train_model.fit_tfrecord(
-        batch_size=batch_size,
-        validation_data=(x_test_batch, y_test_batch),
+    train_model.fit(
+        validation_data=(x_test_batch, y_test_batch) if val_in_train else None,
+        validation_steps=validations_steps if val_in_train else None,
         steps_per_epoch=steps_per_epoch,
         epochs=epochs,
         callbacks=callbacks)
@@ -357,25 +229,33 @@ def main():
     print('[{}] finished in {} ms'.format('TRAINING',
                                           int(elapsed_time * 1000)))
 
-    if not callbacks:  # empty list
-        train_model.save_weights('saved_wt.h5')
+    if not checkpoint:  # empty list
+        train_model.save_weights('./saved_wt.h5')
+
+    # Clean up the TF session.
+    coord.request_stop()
+    coord.join(threads)
 
     KB.clear_session()
 
-    # Second Session, pure Keras. Demonstrate that the model works and is
-    # independent of the TFRecord pipeline.
-    x_test_inp = Input(batch_shape=(None,) + (X_test.shape[1:]))
+    # Second Session. Demonstrate that the model works and is independent of
+    # the TFRecord pipeline, and to test loading trained model without tensors.
+    x_test = np.reshape(data.validation.images,
+                        (data.validation.images.shape[0], 28, 28, 1))
+    y_test = data.validation.labels
+    x_test_inp = KL.Input(shape=(x_test.shape[1:]))
     test_out = cnn_layers(x_test_inp, nclasses)
     test_model = Model(inputs=x_test_inp, outputs=test_out)
 
     test_model.load_weights('saved_wt.h5')
-
-    test_model.compile(optimizer='rmsprop', loss='categorical_crossentropy',
+    test_model.compile(optimizer='rmsprop',
+                       loss='categorical_crossentropy',
                        metrics=['accuracy'])
     test_model.summary()
 
-    loss, acc = test_model.evaluate(
-        X_test, np_utils.to_categorical(y_test), nclasses)
+    loss, acc = test_model.evaluate(x_test,
+                                    to_categorical(y_test),
+                                    nclasses)
     print('\nTest loss: {0}'.format(loss))
     print('\nTest accuracy: {0}'.format(acc))
 
