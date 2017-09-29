@@ -28,11 +28,11 @@ class SlurmClusterParser(ClusterParser):
             num_parameter_servers be less than or equal to the number of
             individual physical nodes
 
-        :param starting_port: Starting port for setting up jobs. Default: 2222
+        :param starting_port: Starting port for setting up jobs. Default: 2300
             TODO: Maybe use SLURM_STEP_RESV_PORTS environment if available.
                 https://stackoverflow.com/a/36803148/3457624
     '''
-    def __init__(self, num_param_servers=-1, starting_port=2222):
+    def __init__(self, num_param_servers=-1, starting_port=2300):
         num_workers = None
         # Check Environment for all needed SLURM variables
         # SLURM_NODELIST for backwards compatability if needed.
@@ -75,7 +75,7 @@ class SlurmClusterParser(ClusterParser):
             self.num_workers = self.num_processes - self.num_parameter_servers
 
         # Default port to use
-        self.starting_port = starting_port  # use user specified port
+        self._starting_port = starting_port  # use user specified port
 
     def _parse_slurm_tasks_per_node(self, num_tasks_per_nodes):
         '''
@@ -120,6 +120,11 @@ class SlurmClusterParser(ClusterParser):
     def my_proc_id(self):
         '''Current process's id or rank.'''
         return self._my_proc_id
+
+    @property
+    def starting_port(self):
+        '''Current process's id or rank.'''
+        return self._starting_port
 
 
 if __name__ == '__main__':

@@ -121,9 +121,7 @@ def main(argv=None):
 
     # ---------------------------------------------- Distributed setup on SLURM
     scpar = SlurmClusterParser()
-    cmgr_facade = TFClusterManagerFacade(
-        scpar.num_tasks_per_host, scpar.hostnames,
-        scpar.num_parameter_servers, scpar.my_proc_id)
+    cmgr_facade = TFClusterManagerFacade(scpar)
 
     logdevp_flag = True if _DEVPROF or logdevp else False
     gpu_options = tf.GPUOptions(allow_growth=True)

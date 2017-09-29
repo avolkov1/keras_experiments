@@ -44,6 +44,10 @@ class ClusterParser(ABC):
     def my_proc_id(self):
         '''Current process's id or rank.'''
 
+    @abstractproperty
+    def starting_port(self):
+        '''Port to start from.'''
+
 
 class JobType(object):
     worker = 'worker'
@@ -67,8 +71,17 @@ class TFClusterManagerFacade(object):
     (typically GPUs) associated with it.
     '''
 
-    def __init__(self, num_tasks_per_host, hostnames,
-                 num_parameter_servers, my_proc_id, starting_port=2222):
+    def __init__(self, cluster_parser):
+        '''
+        :param cluster_parser: Cluster parser implementing ClusterParser class.
+        :type cluster_parser: ClusterParser
+        '''
+        num_tasks_per_host = cluster_parser.num_tasks_per_host
+        hostnames = cluster_parser.hostnames
+        num_parameter_servers = cluster_parser.num_parameter_servers
+        my_proc_id = cluster_parser.my_proc_id
+        starting_port = cluster_parser.starting_port
+
         num_processes = sum(num_tasks_per_host)
         # tuples of (str(Hostname:Port), JobName, TaskID) for each process
         proc_info = [[None, None, None] for _ in range(num_processes)]

@@ -46,9 +46,7 @@ def test(cluster_parser_spec):
                             allow_soft_placement=True,
                             gpu_options=gpu_options)
 
-    cmgr_facade = TFClusterManagerFacade(
-        scpar.num_tasks_per_host, scpar.hostnames,
-        scpar.num_parameter_servers, scpar.my_proc_id)
+    cmgr_facade = TFClusterManagerFacade(scpar)
 
     #: :type cluster_spec: tf.train.ClusterSpec
     cluster_spec = cmgr_facade.get_cluster_spec()
