@@ -102,7 +102,7 @@ def make_model(x_train_input, nclasses):
 def main():
     # user options
     batch_size = 128
-    val_in_train = False
+    val_in_train = False  # not sure how the validation part works during fit.
     use_model_checkpt = False
 
     # demo processing
@@ -115,15 +115,15 @@ def main():
 
     data = mnist.load_mnist()
     X_train = data.train.images
-    X_test = data.test.images
+    # X_test = data.test.images
     train_samples = X_train.shape[0]  # 60000
-    test_samples = X_test.shape[0]  # 10000
+    # test_samples = X_test.shape[0]  # 10000
     height_nrows = 28
     width_ncols = 28
     batch_shape = [batch_size, height_nrows, width_ncols, 1]
     epochs = 5
     steps_per_epoch = train_samples / batch_size
-    validations_steps = test_samples / batch_size
+    # validations_steps = test_samples / batch_size
     nclasses = 10
 
     # The capacity variable controls the maximum queue size
@@ -161,12 +161,12 @@ def main():
 
     x_train_input = Input(tensor=x_train_batch)
 
-    x_test_batch, y_test_batch = tf.train.batch(
-        tensors=[data.test.images, data.test.labels.astype(np.int32)],
-        batch_size=batch_size,
-        capacity=capacity,
-        enqueue_many=enqueue_many,
-        num_threads=8)
+    # x_test_batch, y_test_batch = tf.train.batch(
+    #     tensors=[data.test.images, data.test.labels.astype(np.int32)],
+    #     batch_size=batch_size,
+    #     capacity=capacity,
+    #     enqueue_many=enqueue_many,
+    #     num_threads=8)
 
     # I like the non-functional definition of model more.
     # model_init = make_model(x_train_input, nclasses)
@@ -220,8 +220,10 @@ def main():
 
     start_time = time.time()
     train_model.fit(
-        validation_data=(x_test_batch, y_test_batch) if val_in_train else None,
-        validation_steps=validations_steps if val_in_train else None,
+        # validation_data=(x_test_batch, y_test_batch)
+        # if val_in_train else None, # validation data is not used???
+        # validations_steps if val_in_train else None,
+        # validation_steps=val_in_train,
         steps_per_epoch=steps_per_epoch,
         epochs=epochs,
         callbacks=callbacks)
@@ -253,9 +255,7 @@ def main():
                        metrics=['accuracy'])
     test_model.summary()
 
-    loss, acc = test_model.evaluate(x_test,
-                                    to_categorical(y_test),
-                                    nclasses)
+    loss, acc = test_model.evaluate(x_test, to_categorical(y_test))
     print('\nTest loss: {0}'.format(loss))
     print('\nTest accuracy: {0}'.format(acc))
 

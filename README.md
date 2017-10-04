@@ -30,6 +30,24 @@ Experimental Keras libraries and examples.
         examples/cifar/cifar10_cnn_mgpu.py --mgpu --epochs=10 --checkpt
     ```
 
+
+* [cifar10\_cnn\_mgpu_tfqueue.py](examples/cifar/cifar10_cnn_mgpu_tfqueue.py)
+
+    Cifar10 example with multi-GPU options using Tensorflow queue. This is a
+    similar example to `mnist_tfrecord_mgpu.py`. Run it as follows:
+    ```bash
+    python examples/cifar/cifar10_cnn_mgpu_tfqueue.py --help # read instructions
+    # Use CUDA_VISIBLE_DEVICES to mask GPUs from Tensorflow otherwise uses all.
+    # If CUDA_VISIBLE_DEVICES=0 or a single GPU, the --mgpu flag is ignored.
+    CUDA_VISIBLE_DEVICES=0 python \
+        examples/cifar/cifar10_cnn_mgpu_tfqueue.py --mgpu --epochs=10 # single GPU 
+    CUDA_VISIBLE_DEVICES=0,1,2 python \
+        examples/cifar/cifar10_cnn_mgpu_tfqueue.py --mgpu --epochs=10 # multi-GPU
+        
+    ```
+    Use Tensorflow version 1.2.x and above for good performance. Runs slightly
+    faster than `cifar10_cnn_mgpu.py`, especially when using augmentation.
+
 #### Usage
 Refer to the example above for detailed usage. Typical usage is to define
 a Keras model and then call the model conversion function or class to make it
