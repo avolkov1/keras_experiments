@@ -48,6 +48,16 @@ Experimental Keras libraries and examples.
     Use Tensorflow version 1.2.x and above for good performance. Runs slightly
     faster than `cifar10_cnn_mgpu.py`, especially when using augmentation.
 
+* [cifar10\_cnn\_mgpu_tfqueue\_var.py](examples/cifar/cifar10_cnn_mgpu_tfqueue_var.py)
+
+    Similarly to `cifar10_cnn_mgpu_tfqueue.py` example, this is a slightly
+    different approach on using preloaded data in a Tensorflow queue via
+    placeholder and `tf.Variable`. Refer to:
+
+    [https://www.tensorflow.org/api_guides/python/reading_data#Preloaded_data](https://www.tensorflow.org/api_guides/python/reading_data#Preloaded_data)
+
+    Run the same way as `cifar10_cnn_mgpu_tfqueue.py` example.
+
 #### Usage
 Refer to the example above for detailed usage. Typical usage is to define
 a Keras model and then call the model conversion function or class to make it

@@ -40,7 +40,7 @@ from keras_exp.multigpu import make_parallel
 
 _DEVPROF = False
 
-checkptfile = 'cifar10_cnn_tfqueue.weights.hdf5'
+checkptfile = 'cifar10_cnn_tfqueue_var.weights.hdf5'
 
 
 def parser_(desc):
@@ -189,6 +189,9 @@ def main(argv=None):
     y_train = to_categorical(y_train, num_classes).astype(np.float32)
     y_test = to_categorical(y_test, num_classes).astype(np.float32)
 
+    x_train_feed = x_train.reshape(train_samples, -1)
+    y_train_feed = y_train.reshape(train_samples, -1)
+
     # The capacity variable controls the maximum queue size
     # allowed when prefetching data for training.
     capacity = 10000
@@ -211,18 +214,29 @@ def main(argv=None):
     # Force input pipeline to CPU:0 to avoid data operations ending up on GPU
     # and resulting in a slow down for multigpu case due to comm overhead.
     with tf.device('/cpu:0'):
-        # if no augmentation can go directly from numpy arrays
-        # x_train_batch, y_train_batch = tf.train.shuffle_batch(
-        #     tensors=[x_train, y_train],
-        #     # tensors=[x_train, y_train.astype(np.int32)],
-        #     batch_size=batch_size,
-        #     capacity=capacity,
-        #     min_after_dequeue=min_after_dequeue,
-        #     enqueue_many=enqueue_many,
-        #     num_threads=8)
-
-        input_images = tf.constant(x_train.reshape(train_samples, -1))
-        input_labels = tf.constant(y_train)  # already in proper shape
+        # ref: https://www.tensorflow.org/api_guides/python/reading_data#Preloaded_data @IgnorePep8
+        # Using tf.Variable instead of tf.constant uses less memory, because
+        # the constant is stored inline in the graph data structure which may
+        # be duplicated a few times. The placeholder/variable either is not
+        # duplicated or the duplication will not consume memory since it's a
+        # placeholder.
+        with tf.name_scope('input'):
+            # Input data
+            images_initializer = tf.placeholder(
+                dtype=x_train.dtype,
+                shape=x_train_feed.shape)
+            labels_initializer = tf.placeholder(
+                dtype=y_train.dtype,
+                shape=y_train_feed.shape)
+            # Setting trainable=False keeps the variable out of the
+            # GraphKeys.TRAINABLE_VARIABLES collection in the graph, so we
+            # won't try and update it when training. Setting collections=[]
+            # keeps the variable out of the GraphKeys.GLOBAL_VARIABLES
+            # collection used for saving and restoring checkpoints
+            input_images = tf.Variable(
+                images_initializer, trainable=False, collections=[])
+            input_labels = tf.Variable(
+                labels_initializer, trainable=False, collections=[])
 
         image, label = tf.train.slice_input_producer(
             [input_images, input_labels], shuffle=True)
@@ -323,8 +337,16 @@ def main(argv=None):
     # Start the queue runners.
     sess = KB.get_session()
 
-    # sess.run([tf.local_variables_initializer(),
-    #           tf.global_variables_initializer()])
+    # Create the op for initializing variables.
+    init_op = tf.group(tf.global_variables_initializer(),
+                       tf.local_variables_initializer())
+
+    # Run the Op to initialize the variables.
+    sess.run(init_op)
+    sess.run(input_images.initializer,
+             feed_dict={images_initializer: x_train_feed})
+    sess.run(input_labels.initializer,
+             feed_dict={labels_initializer: y_train_feed})
 
     # Fit the model using data from the TFRecord data tensors.
     coord = tf.train.Coordinator()
