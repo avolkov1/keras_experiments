@@ -1,5 +1,20 @@
 # Keras Experiments
-Experimental Keras libraries and examples.
+Experimental Keras libraries and examples. The `keras_exp` is for exploring
+experimental and new features of Keras. Primary focus is on using Keras in
+conjuction with Tensorflow for multi-GPU and distributed systems. Currently
+this package is not hosted on PyPI. My goals here are to illustrate and explore
+APIs for multi-GPU and distributed systems. If installing I would recommend
+installing this package in editable mode:
+
+```
+git clone https://github.com/avolkov1/keras_experiments.git
+cd keras_experiments
+pip install -e .  # preferably in a virtualenv
+```
+
+Otherwise use `PYTHONPATH`, symlinks, etcetera to use the package within your
+python environment. Feel free to modify, copy, and do whatever you like with
+the code.
 
 
 #### Examples
@@ -13,9 +28,8 @@ Experimental Keras libraries and examples.
     CUDA_VISIBLE_DEVICES=0 python mnist_tfrecord_mgpu.py  # 1 - GPU
     CUDA_VISIBLE_DEVICES=0,1 python mnist_tfrecord_mgpu.py  # 2 - GPUs
     ```
-    Avoiding feed_dict and using a TF queue can give significant performance
-    improvements. I will try to add a corresponding Cifar10 example with this
-    paradigm.
+    Avoiding feed_dict and using a TF queue can give some performance
+    improvements.
     Original implementation of this can be found here:
     [https://github.com/fchollet/keras/blob/master/examples/mnist_tfrecord.py](https://github.com/fchollet/keras/blob/master/examples/mnist_tfrecord.py)
 
@@ -281,7 +295,7 @@ walltime: 0m34.461s
 The performance above does not vary too much between the two examples, but
 bear in mind that Cifar10 is not a very stressful benchmark. It does not even
 make sense to run it distributed per se. This was done for example purposes to
-demonstrate the code API. Do note though, that RDMA makes a huge difference.
+demonstrate the code API. Do note though, that RDMA makes a substantial difference.
 The cluster above has RDMA between the nodes. The data itself resides on NFS.
 I think that in a larger scale scenario, version 2 example's approach should
 scale better.
