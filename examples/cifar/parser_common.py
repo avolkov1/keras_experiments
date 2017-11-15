@@ -1,8 +1,9 @@
 '''
 '''
 from argparse import (
-    ArgumentDefaultsHelpFormatter, HelpFormatter, RawDescriptionHelpFormatter,
-    ArgumentParser, SUPPRESS)  # , FileType)
+    HelpFormatter, RawDescriptionHelpFormatter,
+    ArgumentParser)  # , FileType)
+# ArgumentDefaultsHelpFormatter, SUPPRESS
 from textwrap import dedent
 
 
@@ -21,8 +22,9 @@ class SmartFormatterMixin(HelpFormatter):
         return HelpFormatter._split_lines(self, text, width)
 
 
-class CustomFormatter(ArgumentDefaultsHelpFormatter,
-                      RawDescriptionHelpFormatter, SmartFormatterMixin):
+# class CustomFormatter(ArgumentDefaultsHelpFormatter,
+#                       RawDescriptionHelpFormatter, SmartFormatterMixin):
+class CustomFormatter(RawDescriptionHelpFormatter, SmartFormatterMixin):
     '''Convenience formatter_class for argparse help print out.'''
 
 
@@ -42,7 +44,7 @@ def parser_def_mgpu(desc):
         const=-1,  # if mgpu is specified but value not provided then -1
         # if mgpu is not specified then defaults to 0 - single gpu
         # mgpu = 0 if getattr(args, 'mgpu', None) is None else args.mgpu
-        default=SUPPRESS,
+        # default=SUPPRESS,
         help='S|Run on multiple-GPUs using all available GPUs on a system. If'
         '\nnot passed does not use multiple GPU. If passed uses all GPUs.'
         '\nOptionally specify a number to use that many GPUs. Another approach'
@@ -50,21 +52,34 @@ def parser_def_mgpu(desc):
         '\nspecify --mgpu to use this specified device list.'
         '\nThis option is only supported with TensorFlow backend.')
 
-    parser.add_argument('--enqueue', action='store_true', default=False,
-                        help='S|Use StagingArea in multi-gpu model.\n')
+    parser.add_argument(
+        '--enqueue', action='store_true', default=False,
+        help='S|Use StagingArea in multi-gpu model. Default: %(default)s\n')
 
-    parser.add_argument('--syncopt', action='store_true', default=False,
-                        help='S|Use gradient synchronization in Optimizer.\n')
+    parser.add_argument(
+        '--syncopt', action='store_true', default=False,
+        help='S|Use gradient synchronization in Optimizer. '
+        'Default: %(default)s')
 
-    parser.add_argument('--nccl', action='store_true', default=False,
-                        help='S|Use NCCL contrib lib.\n')
+    parser.add_argument(
+        '--nccl', action='store_true', default=False,
+        help='S|Use NCCL contrib lib. Default: %(default)s')
 
-    parser.add_argument('--epochs', type=int, default=200,
-                        help='Number of epochs to run training for.')
+    parser.add_argument(
+        '--epochs', type=int, default=200,
+        help='S|Number of epochs to run training for.\n'
+        '(Default: %(default)s)\n')
 
-    parser.add_argument('--rdma', action='store_true', default=False,
-                        help='S|Use RDMA with Tensorflow. Requires that TF \n'
-                             'was compiled with RDMA support.\n')
+    # parser.add_argument('--rdma', action='store_true', default=False,
+    #                     help='S|Use RDMA with Tensorflow. Requires that TF\n'
+    #                          'was compiled with RDMA support.\n')
+
+    parser.add_argument(
+        '--rdma', action='store', nargs='?', type=str.lower, const='verbs',
+        choices=['verbs', 'gdr'],
+        help='S|Use RDMA with Tensorflow. Requires that TF \n'
+        'was compiled with RDMA support. If TF and infrastructure supports\n'
+        'GPUDirect RDMA can specify gdr. Default: verbs when set.')
 
     return parser
 

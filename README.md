@@ -1,10 +1,10 @@
 # Keras Experiments
-Experimental Keras libraries and examples. The `keras_exp` is for exploring
-experimental and new features of Keras. Primary focus is on using Keras in
-conjuction with Tensorflow for multi-GPU and distributed systems. Currently
-this package is not hosted on PyPI. My goals here are to illustrate and explore
-APIs for multi-GPU and distributed systems. If installing I would recommend
-installing this package in editable mode:
+Experimental Keras libraries and examples. The `keras_exp` package is for
+exploring experimental and new features of Keras. Primary focus is on using
+Keras in conjuction with Tensorflow for multi-GPU and distributed systems.
+Currently this package is not hosted on PyPI. My goals here are to illustrate
+and explore APIs for multi-GPU and distributed systems. If installing I would
+recommend installing this package in editable mode:
 
 ```
 git clone https://github.com/avolkov1/keras_experiments.git
@@ -18,6 +18,16 @@ the code.
 
 
 #### Examples
+In general you should run latest version of Keras for various examples. The
+latest release as of this update is Keras 2.1.1. This release has many great
+features. I will be cleaning up the code in the `keras_exp` package relying
+on features in the mainline Keras. For example, the monkey patch for the
+backend TF function is no longer necessary given the ability to pass fetches to
+K.Function() with the TensorFlow backend (Keras 2.1.0 improvement). Even the
+`make_parallel` function itself is no longer necessary as it has been
+incorporated in Keras 2.0.9 `keras.utils.multi_gpu_model`. A few enhancements
+remain. Refer to [`make_parallel`](#function-make_parallel) below.
+
 * [mnist\_tfrecord\_mgpu.py](examples/mnist/mnist_tfrecord_mgpu.py)
 
     Mnist example with multi-GPU data parallelism distribution using TFRecords
@@ -44,6 +54,19 @@ the code.
         examples/cifar/cifar10_cnn_mgpu.py --mgpu --epochs=10 --checkpt
     ```
 
+The `*_tfqueue` examples use preloaded API. Refer to:
+
+[https://www.tensorflow.org/api_guides/python/reading_data#Preloaded_data](https://www.tensorflow.org/api_guides/python/reading_data#Preloaded_data)
+
+The preloaded API for numpy arrays has been superseded by TF's Dataset API, but
+sometimes (such as some sophisticated data augmentation case) it is still
+useful to implement it via low level. For Dataset API refer to:
+
+[https://www.tensorflow.org/programmers_guide/datasets#consuming_numpy_arrays](https://www.tensorflow.org/programmers_guide/datasets#consuming_numpy_arrays)
+
+Keras example via Dataset API can be found here:
+
+[https://github.com/fchollet/keras/blob/master/examples/mnist_dataset_api.py](https://github.com/fchollet/keras/blob/master/examples/mnist_dataset_api.py)
 
 * [cifar10\_cnn\_mgpu_tfqueue.py](examples/cifar/cifar10_cnn_mgpu_tfqueue.py)
 
@@ -66,11 +89,39 @@ the code.
 
     Similarly to `cifar10_cnn_mgpu_tfqueue.py` example, this is a slightly
     different approach on using preloaded data in a Tensorflow queue via
-    placeholder and `tf.Variable`. Refer to:
+    placeholder and `tf.Variable`. Run the same way as
+    `cifar10_cnn_mgpu_tfqueue.py` example.
 
-    [https://www.tensorflow.org/api_guides/python/reading_data#Preloaded_data](https://www.tensorflow.org/api_guides/python/reading_data#Preloaded_data)
+The examples below are implemented via Horovod.
 
-    Run the same way as `cifar10_cnn_mgpu_tfqueue.py` example.
+[https://eng.uber.com/horovod/](https://eng.uber.com/horovod/)
+
+Refer to the bottom of this README for setting up Horovod. Compare these
+implemenations to the ones using `make_parallel`. Main difference is that
+Horovod implements synchronous training, while the `make_parallel` implements
+asynchronous training.
+
+* [cifar10\_cnn\_horovod.py](examples/cifar/cifar10_cnn_horovod.py)
+
+    Using 4 GPUs with data augmentation run the example via:
+    ```
+    TMPDIR=/tmp mpirun --report-bindings --map-by ppr:2:socket -oversubscribe \
+        -np 4 python2 ./examples/cifar/cifar10_cnn_horovod.py --epochs=4 --aug
+    ```
+
+    To change the number of GPUs change the option `-np`.
+
+* [cifar10\_cnn\_horovod\_tfqueue.py](examples/cifar/cifar10_cnn_horovod_tfqueue.py)
+
+    Same as the `cifar10_cnn_horovod.py`, but using the TF queue pipeline.
+
+The Horovod framework seems to scale extremely well. It enables one to also
+easily scale multinode. The examples above can easily be scaled to multinode
+by changing `--np 8` assuming 4 GPUs per node. Tensorflow/Keras code on HPC
+type networks with NCCL2 and Horovod is very easy to scale. Additional
+enhancements such as RDMA and/or GPUDirect RDMA are transparently used via
+MPI+NCCL2 combination implemented in Horovod.
+
 
 #### Usage
 Refer to the example above for detailed usage. Typical usage is to define
@@ -78,6 +129,22 @@ a Keras model and then call the model conversion function or class to make it
 run on multiple GPUs.
 
 ##### Function: make\_parallel
+A similar function has been added to mainstream Keras version 2.0.9
+`keras.utils.multi_gpu_model`:<br/>
+[https://github.com/fchollet/keras/releases/tag/2.0.9](https://github.com/fchollet/keras/releases/tag/2.0.9)
+
+The version implemented here differs slightly. The slicing is done on CPU
+which enables using batch sizes that exceed a single GPUs memory. Also added
+ability to save/load of parameters of original serial model with multigpu model
+instance via `ModelGPU` class wrapper.
+Refer to this comment:<br/>
+[https://github.com/fchollet/keras/issues/2436#issuecomment-337591230](https://github.com/fchollet/keras/issues/2436#issuecomment-337591230)
+
+There is also an attempt in this version to implement synchronized training via
+gradient synchronization. Synchronized training doesn't seem to work properly
+yet so contributions are welcome. Another feature is to use StagingArea to
+speedup data copy to GPUs. Refer to issue #2 as this is in the works.
+
 ```python
 def make_parallel(serial_model, gdev_list, ps_device='/cpu:0', usenccl=False,
                   initsync=True, syncopt=False, enqueue=False,
@@ -170,8 +237,24 @@ following parameters at their defaults:
 
 Maybe set initsync to False as it should not make a difference.
 
+Note, for some reason often the validation loss and accuracy reported during
+training by Keras is incorrect when the batch is sliced per `make_parallel`
+function. Therefore I would recommend that after training a parallel model run
+validation with the serial model.
+```python
+# EXAMPLE: Validate after training to get the correct loss (accuracy) measure.
+serial_model.compile(loss='categorical_crossentropy',
+                     optimizer=opt, metrics=['accuracy'])
+metrics = serial_model.evaluate(x=x_test, y=y_test, batch_size=batch_size)
+print('\nVALIDATION LOSS, ACC: {}, {}'.format(*metrics))
+```
+
 
 #### Distributed
+I would like to note that at this time Horovod is probably the easiest approach
+to adopt for multinode scaling. The approach below might still be beneficial
+if MPI is not available.
+
 Familiarize yourself with basics of Tensorflow distributed.
 
 [https://www.tensorflow.org/extend/architecture](https://www.tensorflow.org/extend/architecture)
@@ -304,6 +387,10 @@ Disclaimer: The distributed implementation is still very beta and needs more
 testing. I am still learning and trying to understand distributed Tensorflow.
 
 ##### RDMA with Tensorflow
+Tensorflow version 1.3+ have the RDMA fixes incorporated, so no need to patch
+with TF 1.3+ versions. Also, use Bazel 0.5.4. Instructions that follow are for
+TF 1.2.1.
+
 In order to use RDMA I compiled Tensorflow 1.2.1 with a patch.
 
 ```bash
@@ -349,3 +436,50 @@ pip install $HOME/tmp/tensorflow_pkg/tensorflow-1.2.1-cp27-cp27mu-linux_x86_64.w
 ```
 
 
+#### Dockerfiles with Horovod
+Horovod is a "distributed training framework for TensorFlow" that has been open
+sourced by Uber. It can also be used within a node for effective multigpu
+parallelization or distributed across nodes. Please refer to horovod github for
+details:
+
+[https://github.com/uber/horovod](https://github.com/uber/horovod)
+
+I added two Dockerfiles for setting up Horovod. These containers can be used
+for straightforward parallelization within a single node.
+
+* [Dockerfile\_tfnvcr\_horovod](dockerfiles/Dockerfile_tfnvcr_horovod)
+
+    This dockerfile is based off of Tensorflow containers found on the Nvidia
+    GPU Cloud Registry. [https://ngc.nvidia.com](https://ngc.nvidia.com).
+    Go to the site to register and obtain an API key for docker login.
+    Login to registry via:
+    ```
+    docker login nvcr.io -u \$oauthtoken -p <API_KEY_FROM_NGC>
+    ```
+    NCCL2 is already installed in Tensorflow containers from nvcr.io
+
+* [Dockerfile\_tfpub\_horovod](dockerfiles/Dockerfile_tfpub_horovod)
+
+    This dockerfile is based off of Tensorflow containers found on docker hub.
+    Download NCCL2 from:<br/>
+    &emsp;&emsp;[https://developer.nvidia.com/nccl/nccl-download](https://developer.nvidia.com/nccl/nccl-download)<br/>
+    When building this container set the path to the deb archive.
+    ```
+    docker build \
+        --build-arg BASECONTAINER=tensorflow/tensorflow:1.3.0-devel-gpu \
+        --build-arg NCCL2DEBFILE=local_path_to_NCCL2_debfile \
+        -t tf1.3.0_horovod -f ./dockerfiles/Dockerfile_tfpub_horovod .
+    ```
+    Change basecontainer, tag, nccl2 file as needed. Current NCCL2 deb files
+    are:
+    ```
+    nccl-repo-ubuntu1404-2.0.5-ga-cuda8.0_2-1_amd64.deb
+    nccl-repo-ubuntu1404-2.0.5-ga-cuda9.0_3-1_amd64.deb
+    nccl-repo-ubuntu1604-2.0.5-ga-cuda8.0_2-1_amd64.deb (this one works with tensorflow/tensorflow:1.3.0-devel-gpu)
+    nccl-repo-ubuntu1604-2.0.5-ga-cuda9.0_3-1_amd64.deb
+    ```
+    Use the appropriate NCCL2 for the corresponding Tensorflow base container.
+
+I will be adding Horovod examples for comparison. Horovod uses synchronous
+training which compared to asynchronous training generally converges faster
+during training.

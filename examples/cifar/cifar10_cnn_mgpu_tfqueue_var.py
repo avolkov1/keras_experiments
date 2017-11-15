@@ -186,8 +186,10 @@ def main(argv=None):
     x_train /= 255
     x_test /= 255
 
-    y_train = to_categorical(y_train, num_classes).astype(np.float32)
-    y_test = to_categorical(y_test, num_classes).astype(np.float32)
+    # Squeeze is to deal with to_categorical bug in Keras 2.1.0 which
+    # was fixed in Keras 2.1.1
+    y_train = to_categorical(y_train, num_classes).astype(np.float32).squeeze()
+    y_test = to_categorical(y_test, num_classes).astype(np.float32).squeeze()
 
     x_train_feed = x_train.reshape(train_samples, -1)
     y_train_feed = y_train.reshape(train_samples, -1)
@@ -199,17 +201,6 @@ def main(argv=None):
     # min_after_dequeue is the minimum number elements in the queue
     # after a dequeue, which ensures sufficient mixing of elements.
     # min_after_dequeue = 3000
-
-    # If `enqueue_many` is `False`, `tensors` is assumed to represent a
-    # single example.  An input tensor with shape `[x, y, z]` will be output
-    # as a tensor with shape `[batch_size, x, y, z]`.
-    #
-    # If `enqueue_many` is `True`, `tensors` is assumed to represent a
-    # batch of examples, where the first dimension is indexed by example,
-    # and all members of `tensors` should have the same size in the
-    # first dimension.  If an input tensor has shape `[*, x, y, z]`, the
-    # output will have shape `[batch_size, x, y, z]`.
-    # enqueue_many = True
 
     # Force input pipeline to CPU:0 to avoid data operations ending up on GPU
     # and resulting in a slow down for multigpu case due to comm overhead.
@@ -280,18 +271,11 @@ def main(argv=None):
             capacity=capacity,
             num_threads=8)
 
-        # x_train_batch, y_train_batch = tf.train.shuffle_batch(
-        #     tensors=[image, label],
-        #     batch_size=batch_size,
-        #     capacity=capacity,
-        #     min_after_dequeue=min_after_dequeue,
-        #     num_threads=8)
-
         x_test_batch, y_test_batch = tf.train.batch(
             [test_image, test_label],
-            batch_size=train_samples,
+            batch_size=test_samples,
             capacity=capacity,
-            num_threads=8,
+            num_threads=1,
             name='test_batch',
             shared_name='test_batch')
 
@@ -363,16 +347,11 @@ def main(argv=None):
         epochs=epochs,
         callbacks=callbacks)
     elapsed_time = time.time() - start_time
-    print('[{}] finished in {} ms'.format('TRAINING',
-                                          int(elapsed_time * 1000)))
+    print('[{}] finished in {} s'.format('TRAINING', round(elapsed_time, 3)))
 
     weights_file = checkptfile  # './saved_cifar10_wt.h5'
     if not checkpt_flag:  # empty list
         model.save_weights(checkptfile)
-
-    # Clean up the TF session.
-    coord.request_stop()
-    coord.join(threads)
 
     KB.clear_session()
 
@@ -386,14 +365,28 @@ def main(argv=None):
                        metrics=['accuracy'])
 
     if data_augmentation:
-        x_proccessed = sess.run(x_test_batch)
-        y_proccessed = sess.run(y_test_batch)
-        loss, acc = test_model.evaluate(x_proccessed, y_proccessed)
+        # Need to run x_test through per_image_standardization otherwise
+        # results get messed up.
+        x_processed, y_processed = sess.run([x_test_batch, y_test_batch])
+        # DEBUGGING
+        # xdiff = np.abs(x_test - x_processed)
+        # print('MAX XDIFF: {}'.format(np.max(xdiff)))
+        # ydiff = np.abs(y_test - y_processed)
+        # print('y_test: {}'.format(y_test[0:5, :]))
+        # print('y_processed: {}'.format(y_processed[0:5, :]))
+        # print('ydiff: {}'.format(ydiff[-10:, :]))
+        # print('SUM YDIFF: {}'.format(np.sum(ydiff)))
+
+        loss, acc = test_model.evaluate(x_processed, y_processed)
     else:
         loss, acc = test_model.evaluate(x_test, y_test)
 
     print('\nTest loss: {0}'.format(loss))
     print('\nTest accuracy: {0}'.format(acc))
+
+    # Clean up the TF session.
+    coord.request_stop()
+    coord.join(threads)
 
 
 if __name__ == '__main__':

@@ -1,10 +1,7 @@
 #!/usr/bin/env python
 '''Train a simple deep CNN on the CIFAR10 small images dataset.
 
-Using TFRecord queues with Keras and multi-GPU enabled. Compare with:
-https://github.com/avolkov1/keras_experiments/blob/master/examples/cifar/cifar10_cnn_mgpu.py
-https://github.com/fchollet/keras/blob/master/examples/cifar10_cnn.py
-https://github.com/tensorflow/models/blob/master/tutorials/image/cifar10/cifar10_multi_gpu_train.py
+MultiGPU Horovod implementation using TF queue.
 
 Use Tensorflow version 1.2.x and above for good performance.
 '''
@@ -21,22 +18,21 @@ import numpy as np
 from parser_common import parser_def_mgpu, remove_options
 
 import tensorflow as tf
+import horovod.tensorflow as hvd
+# import horovod.keras as hvd_keras
 
+from keras import backend as KB
 # from keras.utils.data_utils import get_file
 from keras.utils import to_categorical
 from keras.datasets import cifar10
 from keras.models import Sequential, Model
 import keras.layers as KL
-from keras import backend as KB
 
 from keras.callbacks import ModelCheckpoint
 
-from keras.optimizers import RMSprop
+from keras.optimizers import TFOptimizer  # , RMSprop
 
-from keras_exp.multigpu import (get_available_gpus, print_mgpu_modelsummary)
-# from keras_exp.multigpu import ModelMGPU
-from keras_exp.multigpu import make_parallel
-from keras_exp.callbacks.timing import BatchTiming, SamplesPerSec
+from keras_exp.callbacks.timing import SamplesPerSec, BatchTiming
 
 
 _DEVPROF = False
@@ -47,7 +43,12 @@ checkptfile = 'cifar10_cnn_tfqueue.weights.hdf5'
 def parser_(desc):
     parser = parser_def_mgpu(desc)
 
-    remove_options(parser, ['--nccl', '--enqueue', '--syncopt', '--rdma'])
+    remove_options(parser, ['--nccl', '--enqueue', '--syncopt', '--rdma',
+                            '--mgpu'])
+
+    parser.add_argument(
+        '--batch_size', type=int, default=32,
+        help='S|Batch size. Default: %(default)s')
 
     parser.add_argument(
         '--checkpt', action='store', nargs='?',
@@ -152,23 +153,35 @@ def main(argv=None):
     desc = main.__doc__  # .format(os.path.basename(__file__))
     # CLI parser
     args = parser_(desc)
-    mgpu = 0 if getattr(args, 'mgpu', None) is None else args.mgpu
+
+    # Initialize Horovod.
+    hvd.init()
+
+    logdevp = args.logdevp  # For debugging
+    log_device_placement, allow_soft_placement = (True, True) \
+        if _DEVPROF or logdevp else (False, False)
+
+    # Pin GPU to be used to process local rank (one GPU per process)
+    config = tf.ConfigProto(log_device_placement=log_device_placement,
+                            allow_soft_placement=allow_soft_placement)
+    config.gpu_options.allow_growth = True
+    config.gpu_options.visible_device_list = str(hvd.local_rank())
+    KB.set_session(tf.Session(config=config))
+
+    # print('LOCAL RANK, OVERAL RANK: {}, {}'.format(hvd.local_rank(),
+    #                                                hvd.rank()))
+
+    ngpus = hvd.size()
 
     checkpt = getattr(args, 'checkpt', None)
     checkpt_flag = False if checkpt is None else True
     filepath = checkpt
     # print('CHECKPT:', checkpt)
 
-    gdev_list = get_available_gpus(mgpu or 1)
-    ngpus = len(gdev_list)
-
-    batch_size_1gpu = 32
-    batch_size = batch_size_1gpu * ngpus
+    batch_size = args.batch_size
     num_classes = 10
     epochs = args.epochs
     data_augmentation = args.aug
-
-    logdevp = args.logdevp
 
     datadir = getattr(args, 'datadir', None)
 
@@ -177,7 +190,7 @@ def main(argv=None):
         if datadir is not None else cifar10.load_data()
     train_samples = x_train.shape[0]
     test_samples = y_test.shape[0]
-    steps_per_epoch = train_samples // batch_size
+    steps_per_epoch = train_samples // batch_size // ngpus
     # validations_steps = test_samples // batch_size
     print(x_train.shape[0], 'train samples')
     print(x_test.shape[0], 'test samples')
@@ -187,8 +200,6 @@ def main(argv=None):
     x_train /= 255
     x_test /= 255
 
-    # Squeeze is to deal with to_categorical bug in Keras 2.1.0 which
-    # was fixed in Keras 2.1.1
     y_train = to_categorical(y_train, num_classes).astype(np.float32).squeeze()
     y_test = to_categorical(y_test, num_classes).astype(np.float32).squeeze()
 
@@ -233,10 +244,12 @@ def main(argv=None):
         #     sess.run(tf.local_variables_initializer())
         #     and maybe also: sess.run(tf.global_variables_initializer())
         image = tf.reshape(image, x_train.shape[1:])
+        # label = tf.one_hot(label, num_classes)
 
         test_images = tf.constant(x_test.reshape(test_samples, -1))
+        test_labels = tf.constant(y_test)  # already in proper shape
         test_image, test_label = tf.train.slice_input_producer(
-            [test_images, y_test], shuffle=False)
+            [test_images, test_labels], shuffle=False)
         test_image = tf.reshape(test_image, x_train.shape[1:])
 
         if data_augmentation:
@@ -269,14 +282,11 @@ def main(argv=None):
             capacity=capacity,
             num_threads=8)
 
-        # https://stackoverflow.com/a/43613376/3457624
         x_test_batch, y_test_batch = tf.train.batch(
             [test_image, test_label],
-            batch_size=test_samples,  # if converting to numpy first
-            # batch_size=batch_size, # if using tensors
+            batch_size=test_samples,
             capacity=capacity,
-            # num_threads=8,
-            num_threads=1,  # set to 1 to make deterministic
+            num_threads=1,
             name='test_batch',
             shared_name='test_batch')
 
@@ -284,46 +294,51 @@ def main(argv=None):
 
     callbacks = []
 
-    if _DEVPROF or logdevp:  # or True:
-        # Setup Keras session using Tensorflow
-        config = tf.ConfigProto(allow_soft_placement=True,
-                                log_device_placement=True)
-        # config.gpu_options.allow_growth = True
-        tfsess = tf.Session(config=config)
-        KB.set_session(tfsess)
-
     model_init = make_model(x_train_input, num_classes,
                             filepath if checkpt_flag else None)
     x_train_out = model_init.output
     # model_init.summary()
-    model_init = Model(inputs=[x_train_input], outputs=[x_train_out])
 
+    model = Model(inputs=[x_train_input], outputs=[x_train_out])
     lr = 0.0001 * ngpus
-    if ngpus > 1:
-        model = make_parallel(model_init, gdev_list)
-    else:
-        # Must re-instantiate model per API below otherwise doesn't work.
-        model = model_init
+    # opt = RMSprop(lr=lr, decay=1e-6)
+    # opt = hvd_keras.DistributedOptimizer(opt)  # , use_locking=True)
 
-    opt = RMSprop(lr=lr, decay=1e-6)
+    # Add Horovod Distributed Optimizer.
+    opt = tf.train.RMSPropOptimizer(lr)
+    opt = hvd.DistributedOptimizer(opt)  # , use_locking=True)
+    opt = TFOptimizer(opt)  # Required for tf.train based optimizers
+
+    # ------------------------------------- HAVE TO GET SESSION AFTER OPTIMIZER
+    sess = KB.get_session()  # RUN BROADCAST_GLOBAL_VARIABLES
+    # -------------------------------------------------------------------------
+
     # Let's train the model using RMSprop
     model.compile(loss='categorical_crossentropy',
                   optimizer=opt,
                   metrics=['accuracy'],
                   target_tensors=[y_train_batch])
 
-    print_mgpu_modelsummary(model)  # will print non-mgpu model as well
+    if hvd.rank() == 0:
+        model.summary()
 
-    if checkpt_flag:
+    # Broadcast initial variable states from rank 0 to all other procs.
+    # This is necessary to ensure consistent initialization of all
+    # workers when training is started with random weights or restored
+    # from a checkpoint.
+    # Callback when using horovod.keras as hvd
+    # callbacks.append(hvd.callbacks.BroadcastGlobalVariablesCallback(0))
+    sess.run(hvd.broadcast_global_variables(0))  # horovod.tensorflow as hvd
+
+    if checkpt_flag and hvd.rank() == 0:
         checkpoint = ModelCheckpoint(filepath, monitor='acc', verbose=1,
                                      save_best_only=True)
-        callbacks += [checkpoint]
+        callbacks.append(checkpoint)
 
-    callbacks += [BatchTiming(), SamplesPerSec(batch_size)]
+    if hvd.rank() == 0:
+        callbacks += [BatchTiming(), SamplesPerSec(batch_size * ngpus)]
 
     # Start the queue runners.
-    sess = KB.get_session()
-
     # sess.run([tf.local_variables_initializer(),
     #           tf.global_variables_initializer()])
 
@@ -340,67 +355,49 @@ def main(argv=None):
         validation_steps=val_in_train,
         steps_per_epoch=steps_per_epoch,
         epochs=epochs,
-        callbacks=callbacks)
+        callbacks=callbacks,
+        verbose=hvd.rank() == 0)
     elapsed_time = time.time() - start_time
-    print('[{}] finished in {} s'.format('TRAINING', round(elapsed_time, 3)))
+
+    if hvd.rank() == 0:
+        print('[{}] finished in {} s'
+              .format('TRAINING', round(elapsed_time, 3)))
 
     weights_file = checkptfile  # './saved_cifar10_wt.h5'
-    if not checkpt_flag:  # empty list
+    if not checkpt_flag and hvd.rank() == 0:
         model.save_weights(checkptfile)
 
-    KB.clear_session()
+    # KB.clear_session()  # don't clear session just yet.
 
-    # Second Session. Demonstrate that the model works
-    # test_model = make_model(x_test.shape[1:], num_classes,
-    #                         weights_file=weights_file)
-    test_model = make_model(x_test.shape[1:], num_classes)
-    test_model.load_weights(weights_file)
-    test_model.compile(loss='categorical_crossentropy',
-                       optimizer=opt,
-                       metrics=['accuracy'])
+    if hvd.rank() == 0:
+        # Second Session. Demonstrate that the model works
+        # test_model = make_model(x_test.shape[1:], num_classes,
+        #                         weights_file=weights_file)
+        test_model = make_model(x_test.shape[1:], num_classes)
+        test_model.load_weights(weights_file)
+        test_model.compile(loss='categorical_crossentropy',
+                           optimizer=opt,
+                           metrics=['accuracy'])
 
-    if data_augmentation:
-        # Need to run x_test through per_image_standardization otherwise
-        # results get messed up.
-        x_processed, y_processed = sess.run([x_test_batch, y_test_batch])
-        # DEBUGGING
-        # xdiff = np.abs(x_test - x_processed)
-        # print('MAX XDIFF: {}'.format(np.max(xdiff)))
-        # ydiff = np.abs(y_test - y_processed)
-        # print('y_test: {}'.format(y_test[0:5, :]))
-        # print('y_processed: {}'.format(y_processed[0:5, :]))
-        # print('ydiff: {}'.format(ydiff[-10:, :]))
-        # print('MAX YDIFF: {}'.format(np.max(np.sum(ydiff))))
+        if data_augmentation:
+            x_processed, y_processed = sess.run([x_test_batch, y_test_batch])
+            loss, acc = test_model.evaluate(x_processed, y_processed)
+        else:
+            loss, acc = test_model.evaluate(x_test, y_test)
 
-        loss, acc = test_model.evaluate(x_processed, y_processed)
-    else:
-        loss, acc = test_model.evaluate(x_test, y_test)
-
-    # # Demonstrate that the model works using TF pipeline directly.
-    # # In tf.train.batch for test data change batch_size=batch_size
-    # # instead of train_samples. Uncomment below and comment out above.
-    # val_samples = x_test.shape[0]
-    # steps_per_epoch_val = int(np.ceil(val_samples / float(batch_size)))
-    # images_val = KL.Input(tensor=x_test_batch)
-    # test_model = make_model(images_val, num_classes,
-    #                         weights_file)
-    # test_model = Model(inputs=[images_val], outputs=[test_model.output])
-    # test_model.compile(
-    #     loss='categorical_crossentropy',
-    #     optimizer=opt,
-    #     metrics=['accuracy'],
-    #     target_tensors=[y_test_batch])
-    # loss, acc = test_model.evaluate(x=None, y=None,
-    #                                 steps=steps_per_epoch_val)
-
-    print('\nTest loss: {0}'.format(loss))
-    print('\nTest accuracy: {0}'.format(acc))
+        print('\nTest loss: {0}'.format(loss))
+        print('\nTest accuracy: {0}'.format(acc))
 
     # Clean up the TF session.
     coord.request_stop()
     coord.join(threads)
 
+    KB.clear_session()
+
 
 if __name__ == '__main__':
+    # run:
+    #   TMPDIR=/tmp mpirun --report-bindings -np 8 --map-by ppr:4:socket \
+    #     python ./examples/cifar/cifar10_cnn_horovod_tfqueue.py --epochs=50
     main()
 

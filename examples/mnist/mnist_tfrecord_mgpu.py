@@ -228,8 +228,7 @@ def main():
         epochs=epochs,
         callbacks=callbacks)
     elapsed_time = time.time() - start_time
-    print('[{}] finished in {} ms'.format('TRAINING',
-                                          int(elapsed_time * 1000)))
+    print('[{}] finished in {} s'.format('TRAINING', round(elapsed_time, 3)))
 
     if not checkpoint:  # empty list
         train_model.save_weights('./saved_wt.h5')

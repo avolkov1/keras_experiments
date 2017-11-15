@@ -165,7 +165,7 @@ def train():
     # Force input pipeline to CPU:0 to avoid operations sometimes ending up on
     # GPU and resulting in a slow down.
     with tf.device('/cpu:0'):
-      images, labels = cifar10.distorted_inputs()
+        images, labels = cifar10.distorted_inputs()
     # images, labels = cifar10.distorted_inputs()
     batch_queue = tf.contrib.slim.prefetch_queue.prefetch_queue(
           [images, labels], capacity=2 * FLAGS.num_gpus)

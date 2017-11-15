@@ -5,7 +5,7 @@ import os
 from keras import backend as K
 from keras.layers import Embedding
 
-from ._mixin_common import mixedomatic
+from keras_exp._mixin_common import mixedomatic
 
 if K.backend() == 'tensorflow':
     import tensorflow as tf

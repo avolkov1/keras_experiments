@@ -1,7 +1,7 @@
 #!/usr/bin/env python
 '''Train a simple deep CNN on the CIFAR10 small images dataset.
 
-MultiGPU implementation.
+MultiGPU Horovod implementation.
 '''
 
 from __future__ import print_function
@@ -11,12 +11,11 @@ import os
 from argparse import SUPPRESS
 
 import numpy as np
-from datetime import datetime
-import threading
 
 from parser_common import parser_def_mgpu, remove_options
 
 import tensorflow as tf
+import horovod.tensorflow as hvd
 
 # from keras.utils.data_utils import get_file
 from keras.utils import to_categorical
@@ -26,16 +25,11 @@ from keras.models import Sequential
 import keras.layers as KL
 from keras import backend as KB
 
-from keras.callbacks import ModelCheckpoint
+# from keras.callbacks import ModelCheckpoint
 
-from keras.optimizers import RMSprop
+from keras.optimizers import TFOptimizer
 
-from keras_exp.multigpu import (get_available_gpus, print_mgpu_modelsummary)
-# from keras_exp.multigpu import ModelMGPU
-from keras_exp.multigpu import make_parallel
-from keras_exp.multigpu.optimizers import RMSPropMGPU
-
-from keras_exp.callbacks.timing import BatchTiming, SamplesPerSec
+from keras_exp.callbacks.timing import SamplesPerSec, BatchTiming
 
 
 _DEVPROF = False
@@ -44,9 +38,14 @@ _DEVPROF = False
 def parser_(desc):
     parser = parser_def_mgpu(desc)
 
-    remove_options(parser, ['--rdma'])
+    remove_options(parser, ['--nccl', '--enqueue', '--syncopt', '--rdma',
+                            '--mgpu'])
 
-    checkptfile = 'cifar10_cnn_mgpu.weights.best.hdf5'
+    parser.add_argument(
+        '--batch_size', type=int, default=32,
+        help='S|Batch size. Default: %(default)s')
+
+    checkptfile = 'cifar10_cnn_hvd.weights.best.hdf5'
     parser.add_argument(
         '--checkpt', action='store', nargs='?',
         const=checkptfile, default=SUPPRESS,
@@ -66,46 +65,6 @@ def parser_(desc):
     args = parser.parse_args()
 
     return args
-
-
-class threadsafe_iter(object):
-    """Takes an iterator/generator and makes it thread-safe by
-    serializing call to the `next` method of given iterator/generator.
-    """
-    def __init__(self, it):
-        self.it = it
-        self.lock = threading.Lock()
-
-    def __iter__(self):
-        return self
-
-    def next(self):
-        with self.lock:
-            return self.it.next()
-
-
-def threadsafe_generator(f):
-    """A decorator that takes a generator function and makes it thread-safe.
-    """
-    def g(*a, **kw):
-        return threadsafe_iter(f(*a, **kw))
-    return g
-
-
-@threadsafe_generator
-def mygenerator(nsamples, batch_size, x_train, y_train):
-    steps_per_epoch = nsamples // batch_size
-    seed = (id(None) + os.getpid() +
-            int(datetime.now().strftime("%Y%m%d%H%M%S%f"))) % 4294967295
-    np.random.RandomState(seed)
-    while 1:
-        # np.random.shuffle()
-        idx_shuffle = np.random.permutation(nsamples)
-        for i in range(steps_per_epoch):
-            start_ = i * batch_size
-            end_ = min((i + 1) * batch_size, nsamples)
-            slice_shuffle = idx_shuffle[start_:end_]
-            yield x_train[slice_shuffle], y_train[slice_shuffle]
 
 
 def make_model(inshape, num_classes, weights_file=None):
@@ -203,17 +162,29 @@ def main(argv=None):
     desc = main.__doc__  # .format(os.path.basename(__file__))
     # CLI parser
     args = parser_(desc)
-    mgpu = 0 if getattr(args, 'mgpu', None) is None else args.mgpu
-    enqueue = args.enqueue
-    usenccl = args.nccl
-    syncopt = args.syncopt
+
+    # Initialize Horovod.
+    hvd.init()
+
+    logdevp = args.logdevp  # For debugging
+    log_device_placement, allow_soft_placement = (True, True) \
+        if _DEVPROF or logdevp else (False, False)
+
+    # Pin GPU to be used to process local rank (one GPU per process)
+    config = tf.ConfigProto(log_device_placement=log_device_placement,
+                            allow_soft_placement=allow_soft_placement)
+    config.gpu_options.allow_growth = True
+    config.gpu_options.visible_device_list = str(hvd.local_rank())
+    KB.set_session(tf.Session(config=config))
+
+    ngpus = hvd.size()
 
     checkpt = getattr(args, 'checkpt', None)
     checkpt_flag = False if checkpt is None else True
     filepath = checkpt
     # print('CHECKPT:', checkpt)
 
-    batch_size = 32
+    batch_size = args.batch_size
     num_classes = 10
     epochs = args.epochs
     data_augmentation = args.aug
@@ -229,8 +200,6 @@ def main(argv=None):
     print(x_train.shape[0], 'train samples')
     print(x_test.shape[0], 'test samples')
 
-    # Squeeze is to deal with to_categorical bug in Keras 2.1.0 which
-    # was fixed in Keras 2.1.1
     # Convert class vectors to binary class matrices.
     y_train = to_categorical(y_train, num_classes).squeeze()
     y_test = to_categorical(y_test, num_classes).squeeze()
@@ -241,84 +210,59 @@ def main(argv=None):
     x_test /= 255
 
     callbacks = []
-
-    if _DEVPROF or logdevp:  # or True:
-        # Setup Keras session using Tensorflow
-        config = tf.ConfigProto(allow_soft_placement=True,
-                                log_device_placement=True)
-        # config.gpu_options.allow_growth = True
-        tfsess = tf.Session(config=config)
-        KB.set_session(tfsess)
+    if hvd.rank() == 0:
+        callbacks += [BatchTiming(), SamplesPerSec(batch_size * ngpus)]
 
     print(x_train.shape, 'train shape')
     # with tf.device('/cpu:0'):
-    model_init = make_model(x_train.shape, num_classes,
-                            filepath if checkpt_flag else None)
+    model = make_model(x_train.shape, num_classes,
+                       filepath if checkpt_flag else None)
 
-    # model_init = partial(make_model, x_train.shape, num_classes,
-    #                      filepath if checkpt_flag else None)
-
-    if checkpt_flag:
-        checkpoint = ModelCheckpoint(filepath, monitor='val_acc', verbose=1,
-                                     save_best_only=True, mode='max')
-        callbacks = [checkpoint]
-
-    lr = 0.0001
-    if mgpu > 1 or mgpu == -1:
-        gpus_list = get_available_gpus(mgpu)
-        ngpus = len(gpus_list)
-        print('Using GPUs: {}'.format(', '.join(gpus_list)))
-        batch_size = batch_size * ngpus  #
-        lr = lr * ngpus
-        # batch_size = 40000  # split over four devices works fine no grad avg
-        # batch_size = 25000  # split over four devices works fine w/ grad avg
-
-        # Data-Parallelize the model via function or class.
-        model = make_parallel(model_init, gpus_list, usenccl=usenccl,
-                              syncopt=syncopt, enqueue=enqueue)
-        # model = ModelMGPU(serial_model=model_init, gdev_list=gpus_list,
-        #                   syncopt=syncopt, usenccl=usenccl, enqueue=enqueue)
-        print_mgpu_modelsummary(model)
-        if not syncopt:
-            opt = RMSprop(lr=lr, decay=1e-6)
-        else:
-            opt = RMSPropMGPU(lr=lr, decay=1e-6, gdev_list=gpus_list)
-
-    else:
-        model = model_init
-        # batch_size = batch_size * 3
-        # batch_size = 25000  # exhaust GPU memory. Crashes.
-        print(model.summary())
-
-        # initiate RMSprop optimizer
-        opt = RMSprop(lr=lr, decay=1e-6)
-
-    callbacks += [BatchTiming(), SamplesPerSec(batch_size)]
+    lr = 0.0001 * ngpus
+    opt = tf.train.RMSPropOptimizer(lr)
+    # Add Horovod Distributed Optimizer.
+    opt = hvd.DistributedOptimizer(opt)  # , use_locking=True)
+    opt = TFOptimizer(opt)
+    # ------------------------------------- HAVE TO GET SESSION AFTER OPTIMIZER
+    # sess = KB.get_session()
+    # -------------------------------------------------------------------------
 
     # Let's train the model using RMSprop
     model.compile(loss='categorical_crossentropy',
                   optimizer=opt,
                   metrics=['accuracy'])
+    if hvd.rank() == 0:
+        model.summary()
 
     nsamples = x_train.shape[0]
-    steps_per_epoch = nsamples // batch_size
-
+    steps_per_epoch = nsamples // batch_size // hvd.size()
+    KB.get_session().run(hvd.broadcast_global_variables(0))
     if not data_augmentation:
         print('Not using data augmentation.')
-        model.fit(x_train, y_train,
-                  batch_size=batch_size,
-                  epochs=epochs,
-                  validation_data=(x_test, y_test),
-                  shuffle=True,
-                  callbacks=callbacks)
+        # model.fit(x_train, y_train,
+        #           batch_size=batch_size,
+        #           epochs=epochs,
+        #           validation_data=(x_test, y_test),
+        #           shuffle=True,
+        #           callbacks=callbacks)
 
-        # Fit the model on the batches generated by datagen.flow().
-        # mygen = mygenerator(nsamples, batch_size, x_train, y_train)
-        # model.fit_generator(mygen,
-        #                     steps_per_epoch=steps_per_epoch,
-        #                     epochs=epochs,
-        #                     validation_data=(x_test, y_test),
-        #                     callbacks=callbacks)
+        train_gen = ImageDataGenerator()
+        test_gen = ImageDataGenerator()
+        test_batches = x_test.shape[0] // batch_size
+        # Train the model. The training will randomly sample 1 / N batches of
+        # training data and 3 / N batches of validation data on every worker,
+        # where N is the number of workers. Over-sampling of validation data
+        # helps to increase probability that every validation example will be
+        # evaluated.
+        model.fit_generator(
+            train_gen.flow(x_train, y_train, batch_size=batch_size),
+            steps_per_epoch=steps_per_epoch,
+            callbacks=callbacks,
+            epochs=epochs,
+            verbose=hvd.rank() == 0,
+            validation_data=test_gen.flow(x_test, y_test,
+                                          batch_size=batch_size),
+            validation_steps=3 * test_batches // hvd.size())
 
     else:
         print('Using real-time data augmentation.')
@@ -344,20 +288,26 @@ def main(argv=None):
         datagen.fit(x_train)
 
         # Fit the model on the batches generated by datagen.flow().
-        model.fit_generator(datagen.flow(x_train, y_train,
-                                         batch_size=batch_size),
-                            steps_per_epoch=steps_per_epoch,
-                            epochs=epochs,
-                            validation_data=(x_test, y_test),
-                            callbacks=callbacks)
+        model.fit_generator(
+            datagen.flow(x_train, y_train, batch_size=batch_size),
+            steps_per_epoch=steps_per_epoch,
+            epochs=epochs,
+            validation_data=(x_test, y_test),
+            verbose=hvd.rank() == 0,
+            callbacks=callbacks)
 
-    model_init.compile(loss='categorical_crossentropy',
-                       optimizer=opt,
-                       metrics=['accuracy'])
-    metrics = model_init.evaluate(x=x_test, y=y_test, batch_size=batch_size)
-    print('\nCIFAR VALIDATION LOSS, ACC: {}, {}'.format(*metrics))
+    if hvd.rank() == 0:
+        metrics = model.evaluate(x=x_test, y=y_test, batch_size=batch_size)
+        print('\nCIFAR VALIDATION LOSS, ACC: {}, {}'.format(*metrics))
+
+    KB.clear_session()
 
 
 if __name__ == '__main__':
+    # run:
+    #   TMPDIR=/tmp mpirun --report-bindings --map-by ppr:2:socket \
+    #     -oversubscribe -np 4 python2 \
+    #     ./examples/cifar/cifar10_cnn_horovod.py --epochs=4 --aug
+    #
     main()
 
