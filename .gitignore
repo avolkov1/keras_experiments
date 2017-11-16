@@ -1,5 +1,5 @@
 *.pyc
-/.README.md.html
+*.README.md.html
 /.project
 /.pydevproject
 /.settings/
