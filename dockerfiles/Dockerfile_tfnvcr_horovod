@@ -1,8 +1,8 @@
-# docker build --build-arg BASECONTAINER=nvcr.io/nvidia/tensorflow:17.07 \
-# -t tf17.07_horovod -f ./dockerfiles/Dockerfile_tf17.07_horovod .
+# docker build --build-arg BASECONTAINER=nvcr.io/nvidia/tensorflow:17.12 \
+# -t tf17.12_horovod -f ./dockerfiles/Dockerfile_tfnvcr_horovod .
 
-ARG BASECONTAINER=nvcr.io/nvidia/tensorflow:17.07
-# FROM nvcr.io/nvidia/tensorflow:17.07
+ARG BASECONTAINER=nvcr.io/nvidia/tensorflow:17.12
+# FROM nvcr.io/nvidia/tensorflow:17.12
 FROM $BASECONTAINER
 
 
@@ -37,4 +37,5 @@ RUN apt-get update && apt-get install -y \
 RUN ln -s /usr/local/cuda/lib64/stubs/libcuda.so /usr/local/cuda/lib64/stubs/libcuda.so.1 && \
     LD_LIBRARY_PATH=/usr/local/cuda/lib64/stubs:${LD_LIBRARY_PATH} && \
     HOROVOD_GPU_ALLREDUCE=NCCL pip install --no-cache-dir horovod && \
+    # HOROVOD_GPU_ALLGATHER=MPI HOROVOD_GPU_BROADCAST=MPI HOROVOD_GPU_ALLREDUCE=NCCL pip2 install --no-cache-dir horovod && \
     rm /usr/local/cuda/lib64/stubs/libcuda.so.1

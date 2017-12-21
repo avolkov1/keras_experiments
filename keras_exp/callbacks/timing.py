@@ -62,6 +62,7 @@ class BatchTiming(Callback):
 # https://github.com/rossumai/keras-multi-gpu
 class SamplesPerSec(Callback):
     def __init__(self, batch_size, **kwargs):
+        Callback.__init__(self, **kwargs)
         self.batch_size = batch_size
 
     def on_train_begin(self, logs={}):

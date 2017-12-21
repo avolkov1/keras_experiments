@@ -11,14 +11,11 @@ from __future__ import print_function
 
 import sys
 # import time
-
-try:
-    from cStringIO import StringIO
-except ImportError:
-    # Python 3 compat.
-    from io import StringIO
-
 from itertools import chain
+
+import warnings
+
+from keras_exp._utils import Capturing
 
 from keras import backend as KB
 from keras.layers.core import Lambda
@@ -31,8 +28,8 @@ if KB.backend() == 'tensorflow':
     # Monkey patch Keras back-end to use Function with enqueue.
     # import keras_exp._patch_tf_backend as tfbpatch
     # tfbpatch.patch()
-    from keras_exp._patch_tf_backend import patch as tfbpatch
-    tfbpatch()
+    # from keras_exp._patch_tf_backend import patch as tfbpatch
+    # tfbpatch()
 
     import tensorflow as tf
     from tensorflow.python.client import device_lib
@@ -52,19 +49,6 @@ _DEBUG = False
 
 __all__ = ('get_available_gpus', 'make_parallel', 'print_mgpu_modelsummary',
            'ModelMGPU')
-
-
-# TODO: Move to some utils module
-class Capturing(list):
-    def __enter__(self):
-        self._stdout = sys.stdout
-        sys.stdout = self._stringio = StringIO()
-        return self
-
-    def __exit__(self, *args):
-        self.extend(self._stringio.getvalue().splitlines())
-        del self._stringio    # free up some memory
-        sys.stdout = self._stdout
 
 
 def get_available_gpus(ngpus=-1):
@@ -227,6 +211,10 @@ class ModelMGPU(Model):
         self._syncopt = kwargs.pop('syncopt', False)
         self._enqueue = kwargs.pop('enqueue', False)
 
+        if self._enqueue:
+            warnings.warn('Enqueue option to use StagingArea currenctly does '
+                          'not work.', UserWarning)
+
         # NOTE: To use staging have to patch keras tensorflow_backend.Function.
         #     Function implementation in keras_exp.multigpu._patch_tf_backend
         self._enqueue_ops = []
@@ -382,7 +370,7 @@ class ModelMGPU(Model):
         if self._enqueue_ops:
             # Produces a warning that kwargs are ignored for Tensorflow. Patch
             # Function in tensorflow_backend to use the enqueue_ops option.
-            kwargs['enqueue_ops'] = self._enqueue_ops
+            kwargs['fetches'] = self._enqueue_ops
 
         super(ModelMGPU, self).compile(*args, **kwargs)
 

@@ -4,59 +4,14 @@ from __future__ import print_function
 
 import sys
 from collections import OrderedDict
-# from contextlib import contextmanager
-
-from abc import ABCMeta, abstractproperty
 import warnings
 
-import tensorflow as tf
+# from contextlib import contextmanager
 
+import tensorflow as tf
+from tfclusterdefs import JobType, DevType
 
 __all__ = ('JobType', 'DevType', 'TFClusterManagerFacade',)
-
-
-ABC = ABCMeta('ABC', (object,), {})  # compatible with Python 2 *and* 3
-
-
-# @six.add_metaclass(ABCMeta)
-class ClusterParser(ABC):
-    '''ClusterParser Abstract Base Class. Defines the interface expected
-    of a cluster parser.
-    '''
-
-    @abstractproperty
-    def num_tasks_per_host(self):
-        '''List of integers. Length of list is number of hosts. Each list
-        element specifies number of tasks on the host. A corresponding
-        property hostnames is a list of hosts with each element specifying
-        the host name. This list and hostnames list must be in the same order.
-        '''
-
-    @abstractproperty
-    def hostnames(self):
-        '''List of hosts with each element specifying the host name.'''
-
-    @abstractproperty
-    def num_parameter_servers(self):
-        '''Number of parameter servers to create/use in the cluster.'''
-
-    @abstractproperty
-    def my_proc_id(self):
-        '''Current process's id or rank.'''
-
-    @abstractproperty
-    def starting_port(self):
-        '''Port to start from.'''
-
-
-class JobType(object):
-    worker = 'worker'
-    ps = 'ps'  # parameter-server
-
-
-class DevType(object):
-    cpu = 'cpu'
-    gpu = 'gpu'
 
 
 class TFClusterManagerFacade(object):
@@ -157,6 +112,14 @@ class TFClusterManagerFacade(object):
         return self._mytask_id
 
     @property
+    def mydevtask(self):
+        task_id = self.mytask_id
+        jobtype = self.myjobtype
+
+        mydevtask = tf.DeviceSpec(job=jobtype, task=task_id)
+        return mydevtask
+
+    @property
     def clusterspec_dict(self):
         return self._cspec_dict
 
@@ -228,7 +191,8 @@ class TFClusterManagerFacade(object):
         if jobtype == JobType.worker:
             self._signal_chief(server, sess)
 
-        mydevtask = tf.DeviceSpec(job=jobtype, task=task_id)
+        # mydevtask = tf.DeviceSpec(job=jobtype, task=task_id)
+        mydevtask = self.mydevtask
         queue = create_done_queue_task(mydevtask)
 
         # RECEIVE SIGNAL FROM CHIEF.
@@ -304,6 +268,13 @@ class TFClusterManagerFacade(object):
             device_type=DevType.cpu,
             device_index=0).to_string()
         return myps
+
+    def get_allps_devlist(self):
+        num_ps = self.num_ps
+
+        ps_devtasklist = [tf.DeviceSpec(job=JobType.ps, task=ii)
+                          for ii in range(num_ps)]
+        return ps_devtasklist
 
     def get_allworkers_devlist(self, ngpus):
         '''Current split strategy is if 1 worker on a node then all GPUs are
@@ -413,4 +384,3 @@ def create_done_queues_chief(devlist):
     :param devlist: List of device specs :class:`tf.DeviceSpec` objects.
     '''
     return [create_done_queue_task(dev) for dev in devlist]
-

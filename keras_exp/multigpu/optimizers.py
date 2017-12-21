@@ -5,7 +5,7 @@ import sys
 
 from keras import backend as K
 from keras.optimizers import (
-    clip_norm, Optimizer,
+    clip_norm, Optimizer, TFOptimizer,
     Adagrad, Adadelta, Adam, Adamax, Nadam, RMSprop, SGD)
 
 from keras_exp._mixin_common import mixedomatic
@@ -30,7 +30,7 @@ if K.backend() == 'tensorflow':
 __all__ = (
     'OptimizerMultiGPUMixin',
     'AdagradMGPU', 'AdadeltaMGPU', 'AdamMGPU', 'AdamaxMGPU', 'NadamMGPU',
-    'RMSPropMGPU', 'SGD_MGPU', )
+    'RMSPropMGPU', 'SGD_MGPU', 'TFOptimizerMGPU',)
 
 
 def all_avg_gradients(tower_gradvars, devices, param_server_device='/gpu:0',
@@ -58,6 +58,50 @@ def all_avg_gradients(tower_gradvars, devices, param_server_device='/gpu:0',
         avg_gradvars.append(avg_gradvars_on_devices)
 
     return list(zip(*avg_gradvars))
+
+
+class TFOptimizerMGPU(TFOptimizer):
+    """Wrapper class for native TensorFlow optimizers.
+    """
+
+    def __init__(self, optimizer, gdev_list=None):
+        self.optimizer = optimizer
+        self._gdev_list = gdev_list
+        with K.name_scope(self.__class__.__name__):
+            self.iterations = K.variable(0, dtype='int64', name='iterations')
+
+    @property
+    def ismgpu(self):
+        return True
+
+    def get_updates(self, loss, params):
+        tower_gradvars = []
+        gdev_list = self._gdev_list
+
+        global_scope = tf.get_variable_scope()
+        for idev, device in enumerate(gdev_list):
+            with tf.device(device), \
+                    tf.variable_scope(global_scope, reuse=idev > 0), \
+                    tf.name_scope('tower_%i' % idev):
+                grads = self.optimizer.compute_gradients(loss, params)
+
+            gradvars = zip(grads, params)
+            tower_gradvars.append(gradvars)
+
+        tower_gradvars = all_avg_gradients(tower_gradvars,
+                                           gdev_list,
+                                           usenccl=False)
+
+        self.updates = [K.update_add(self.iterations, 1)]
+
+        for device_num, device in enumerate(gdev_list):
+            with tf.device(device):
+                gradvars = tower_gradvars[device_num]
+                opt_update = self.optimizer.apply_gradients(
+                    grads, global_step=self.iterations)
+            self.updates.append(opt_update)
+
+        return self.updates
 
 
 class OptimizerMultiGPUMixin(object):
@@ -182,7 +226,7 @@ class OptimizerMultiGPUMixin(object):
 
         return grads
 
-    def get_updates(self, params, constraints, loss):
+    def get_updates(self, loss, params):
         '''
         :override get_updates: Overrides the base Optimizer class/sub-class
             get_updates method to optionally use nccl for gradient aggregation.
@@ -209,8 +253,7 @@ class OptimizerMultiGPUMixin(object):
                     tf.name_scope('tower_%i' % idev):
                 # updates_ = self._baseopt.get_updates(self, params,
                 #                                      constraints, loss)
-                updates_ = self._baseopt.get_updates(params, constraints,
-                                                     loss)
+                updates_ = self._baseopt.get_updates(loss, params)
             updates += [up for up in updates_ if up not in updates]
 
             if (not have_nccl or not self.usenccl) and idev == 0:

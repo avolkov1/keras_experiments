@@ -2,6 +2,17 @@
 '''Train a simple deep CNN on the CIFAR10 small images dataset.
 
 Distributed training.
+
+run:
+    salloc -N2  -p hsw_p40 --comment=docker  --qos=short --time=04:00:00
+
+    srun -l --ntasks-per-node=2 \
+      python examples/cifar/cifar10_cnn_distrib_v2_slurm.py --epochs=5 --rdma
+    # rdma default is verbs
+
+    # On psgcluster --network=ib.cluster is required for --rdma=gdr option
+    # couldn't get --rdma=gdr option to work.
+
 '''
 from __future__ import print_function
 
@@ -30,10 +41,11 @@ from keras_exp.multigpu import make_parallel
 
 import tensorflow as tf
 
-from keras_exp.distrib.slurm import SlurmClusterParser
-from keras_exp.distrib import TFClusterManagerFacade, JobType  # , DevType
+from keras_exp.distrib.cluster_parsers.slurm import SlurmClusterParser
+from keras_exp.distrib.cluster_mgrs.tfcmgr import (
+    TFClusterManagerFacade, JobType)  # , DevType
+from keras_exp.distrib.cluster_mgrs.tfclusterdefs import ProtocolType
 
-# from functools import partial
 
 _DEVPROF = False
 
@@ -106,6 +118,7 @@ def main(argv=None):
     # usenccl = args.nccl
     # syncopt = args.syncopt
     rdma = args.rdma
+    network = args.network
 
     checkpt = getattr(args, 'checkpt', None)
     checkpt_flag = False if checkpt is None else True
@@ -120,7 +133,7 @@ def main(argv=None):
     logdevp = args.logdevp
 
     # ---------------------------------------------- Distributed setup on SLURM
-    scpar = SlurmClusterParser()
+    scpar = SlurmClusterParser(network=network)
     cmgr_facade = TFClusterManagerFacade(scpar)
 
     logdevp_flag = True if _DEVPROF or logdevp else False
@@ -130,9 +143,10 @@ def main(argv=None):
                             gpu_options=gpu_options)
 
     # TF 1.2.x RDMA: specify protocol='grpc+verbs' in server below.
+    protocol = ProtocolType.get_server_protocol_str(rdma)
     server = cmgr_facade.get_server(
         config,
-        protocol='grpc+verbs' if rdma else None)
+        protocol=protocol)
     tfsess = cmgr_facade.get_session(server)
     KB.set_session(tfsess)
 

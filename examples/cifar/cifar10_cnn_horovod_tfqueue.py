@@ -4,6 +4,26 @@
 MultiGPU Horovod implementation using TF queue.
 
 Use Tensorflow version 1.2.x and above for good performance.
+
+run:
+  TMPDIR=/tmp mpirun --report-bindings -np 8 --map-by ppr:4:socket \
+    python ./examples/cifar/cifar10_cnn_horovod_tfqueue.py --epochs=50
+
+TMPDIR=/tmp mpirun --report-bindings -mca btl_tcp_if_exclude docker0,lo \
+  --bind-to none --map-by slot -np 8 \
+  run_psgcluster_singularity.sh --datamnt=/cm \
+    --container=/cm/shared/singularity/tf1.4.0_hvd_ompi3.0.0-2017-11-23-154091b4d08c.img \
+    --venvpy=~/.virtualenvs/py-keras_theano \
+    --scripts=./examples/cifar/cifar10_cnn_horovod_tfqueue.py \
+    --epochs=20
+
+TMPDIR=/tmp mpirun --report-bindings -mca btl_tcp_if_exclude docker0,lo \
+  --bind-to none --map-by slot -np 8 singularity exec --nv \
+  /cm/shared/singularity/tf1.4.0_hvd_ompi3.0.0-2017-11-23-154091b4d08c.img \
+  bash -c 'LD_LIBRARY_PATH=/.singularity.d/libs:$LD_LIBRARY_PATH; \
+    source ~/.virtualenvs/py-keras_theano/bin/activate && \
+    python ./examples/cifar/cifar10_cnn_horovod_tfqueue.py --epochs=20'
+
 '''
 
 from __future__ import print_function
@@ -21,12 +41,12 @@ import tensorflow as tf
 import horovod.tensorflow as hvd
 # import horovod.keras as hvd_keras
 
-from keras import backend as KB
 # from keras.utils.data_utils import get_file
 from keras.utils import to_categorical
 from keras.datasets import cifar10
 from keras.models import Sequential, Model
 import keras.layers as KL
+from keras import backend as KB
 
 from keras.callbacks import ModelCheckpoint
 
@@ -49,6 +69,12 @@ def parser_(desc):
     parser.add_argument(
         '--batch_size', type=int, default=32,
         help='S|Batch size. Default: %(default)s')
+
+    parser.add_argument(
+        '--nranks_per_gpu', type=int, default=1,
+        help='S|Number of ranks to run on each GPUs. Use this parameter to\n'
+        'oversubscribe a GPU. When oversubscribing a GPU use in combination\n'
+        'with MPS (multi-process service). Default: %(default)s')
 
     parser.add_argument(
         '--checkpt', action='store', nargs='?',
@@ -161,17 +187,21 @@ def main(argv=None):
     log_device_placement, allow_soft_placement = (True, True) \
         if _DEVPROF or logdevp else (False, False)
 
+    nranks_per_gpu = args.nranks_per_gpu
+    local_rank = hvd.local_rank()
+    gpu_local_rank = local_rank // nranks_per_gpu
+    print('local_rank, GPU_LOCAL_RANK: {}, {}'.format(
+        local_rank, gpu_local_rank))
+
     # Pin GPU to be used to process local rank (one GPU per process)
     config = tf.ConfigProto(log_device_placement=log_device_placement,
                             allow_soft_placement=allow_soft_placement)
     config.gpu_options.allow_growth = True
-    config.gpu_options.visible_device_list = str(hvd.local_rank())
+    # config.gpu_options.visible_device_list = str(hvd.local_rank())
+    config.gpu_options.visible_device_list = str(gpu_local_rank)
     KB.set_session(tf.Session(config=config))
 
-    # print('LOCAL RANK, OVERAL RANK: {}, {}'.format(hvd.local_rank(),
-    #                                                hvd.rank()))
-
-    ngpus = hvd.size()
+    hvdsize = hvd.size()
 
     checkpt = getattr(args, 'checkpt', None)
     checkpt_flag = False if checkpt is None else True
@@ -189,17 +219,18 @@ def main(argv=None):
     (x_train, y_train), (x_test, y_test) = cifar10_load_data(datadir) \
         if datadir is not None else cifar10.load_data()
     train_samples = x_train.shape[0]
-    test_samples = y_test.shape[0]
-    steps_per_epoch = train_samples // batch_size // ngpus
+    test_samples = x_test.shape[0]
+    steps_per_epoch = train_samples // batch_size // hvdsize
     # validations_steps = test_samples // batch_size
-    print(x_train.shape[0], 'train samples')
-    print(x_test.shape[0], 'test samples')
+    print(train_samples, 'train samples')
+    print(test_samples, 'test samples')
 
     x_train = x_train.astype('float32')
     x_test = x_test.astype('float32')
     x_train /= 255
     x_test /= 255
 
+    # Convert class vectors to binary class matrices.
     y_train = to_categorical(y_train, num_classes).astype(np.float32).squeeze()
     y_test = to_categorical(y_test, num_classes).astype(np.float32).squeeze()
 
@@ -300,12 +331,12 @@ def main(argv=None):
     # model_init.summary()
 
     model = Model(inputs=[x_train_input], outputs=[x_train_out])
-    lr = 0.0001 * ngpus
+    lr = 0.0001 * hvdsize
     # opt = RMSprop(lr=lr, decay=1e-6)
     # opt = hvd_keras.DistributedOptimizer(opt)  # , use_locking=True)
 
-    # Add Horovod Distributed Optimizer.
     opt = tf.train.RMSPropOptimizer(lr)
+    # Add Horovod Distributed Optimizer.
     opt = hvd.DistributedOptimizer(opt)  # , use_locking=True)
     opt = TFOptimizer(opt)  # Required for tf.train based optimizers
 
@@ -336,7 +367,7 @@ def main(argv=None):
         callbacks.append(checkpoint)
 
     if hvd.rank() == 0:
-        callbacks += [BatchTiming(), SamplesPerSec(batch_size * ngpus)]
+        callbacks += [BatchTiming(), SamplesPerSec(batch_size * hvdsize)]
 
     # Start the queue runners.
     # sess.run([tf.local_variables_initializer(),
@@ -381,12 +412,11 @@ def main(argv=None):
 
         if data_augmentation:
             x_processed, y_processed = sess.run([x_test_batch, y_test_batch])
-            loss, acc = test_model.evaluate(x_processed, y_processed)
+            metrics = test_model.evaluate(x_processed, y_processed)
         else:
-            loss, acc = test_model.evaluate(x_test, y_test)
+            metrics = test_model.evaluate(x_test, y_test)
 
-        print('\nTest loss: {0}'.format(loss))
-        print('\nTest accuracy: {0}'.format(acc))
+        print('\nCIFAR VALIDATION LOSS, ACC: {}, {}'.format(*metrics))
 
     # Clean up the TF session.
     coord.request_stop()
@@ -396,8 +426,5 @@ def main(argv=None):
 
 
 if __name__ == '__main__':
-    # run:
-    #   TMPDIR=/tmp mpirun --report-bindings -np 8 --map-by ppr:4:socket \
-    #     python ./examples/cifar/cifar10_cnn_horovod_tfqueue.py --epochs=50
     main()
 

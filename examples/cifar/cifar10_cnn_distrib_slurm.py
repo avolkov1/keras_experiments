@@ -2,6 +2,20 @@
 '''Train a simple deep CNN on the CIFAR10 small images dataset.
 
 Distributed training.
+
+run:
+    salloc -N2  -p hsw_p40 --comment=docker  --qos=short --time=04:00:00
+
+    srun -l --ntasks-per-node=2 python \
+    examples/cifar/cifar10_cnn_distrib_slurm.py --epochs=5 --network=ib.cluster
+
+    srun -l --ntasks-per-node=2 \
+      python examples/cifar/cifar10_cnn_distrib_slurm.py --epochs=5 --rdma
+    # rdma default is verbs
+
+    # On psgcluster --network=ib.cluster is required for --rdma=gdr option
+    # couldn't get --rdma=gdr option to work.
+
 '''
 from __future__ import print_function
 
@@ -30,8 +44,10 @@ from keras_exp.multigpu import make_parallel
 
 import tensorflow as tf
 
-from keras_exp.distrib.slurm import SlurmClusterParser
-from keras_exp.distrib import TFClusterManagerFacade, JobType  # , DevType
+from keras_exp.distrib.cluster_parsers.slurm import SlurmClusterParser
+from keras_exp.distrib.cluster_mgrs.tfcmgr import (
+    TFClusterManagerFacade, JobType)  # , DevType
+from keras_exp.distrib.cluster_mgrs.tfclusterdefs import ProtocolType
 
 # from functools import partial
 
@@ -105,7 +121,11 @@ def main(argv=None):
     # enqueue = args.enqueue
     # usenccl = args.nccl
     # syncopt = args.syncopt
+    # print('RDMA: {}'.format(args.rdma))
+    # rdma = getattr(args, 'rdma', None)
     rdma = args.rdma
+    network = args.network
+    # print('NETWORK: {}'.format(network))
 
     checkpt = getattr(args, 'checkpt', None)
     checkpt_flag = False if checkpt is None else True
@@ -120,7 +140,13 @@ def main(argv=None):
     logdevp = args.logdevp
 
     # ---------------------------------------------- Distributed setup on SLURM
-    scpar = SlurmClusterParser()
+    # Specifying network necessary for protocol='grpc+gdr'. GDR doesn't find
+    # IB addresses automatically like 'grpc+verbs'.
+    # The 'ib.cluster' is specific to NVIDIA psgcluster.
+    # network = 'ib.cluster' if rdma == 'gdr' else None
+    # network = 'ib.cluster'
+    # On fast network even without RDMA speed up significant. RDMA still helps.
+    scpar = SlurmClusterParser(network=network)
     cmgr_facade = TFClusterManagerFacade(scpar)
 
     logdevp_flag = True if _DEVPROF or logdevp else False
@@ -129,10 +155,14 @@ def main(argv=None):
                             allow_soft_placement=True,
                             gpu_options=gpu_options)
 
+    print('\n\tCLUSTER_SPEC_DICT: {}\n'.format(cmgr_facade.clusterspec_dict))
+
     # TF 1.2.x RDMA: specify protocol='grpc+verbs' in server below.
+    protocol = ProtocolType.get_server_protocol_str(rdma)
+    # print('PROTOCOL: {}'.format(protocol))
     server = cmgr_facade.get_server(
         config,
-        protocol='grpc+verbs' if rdma else None)
+        protocol=protocol)
     tfsess = cmgr_facade.get_session(server)
     KB.set_session(tfsess)
 
@@ -164,10 +194,16 @@ def main(argv=None):
 
     # List of all devices. The devices might be associated to the same worker.
     wgdev_list = cmgr_facade.get_allworkers_devlist(ngpus)
+    print('\n\tWGDEV_LIST: {}\n'
+          .format([dev.to_string() for dev in wgdev_list]))  # DEBUG
     # If 2 workers ea. w/ 4 devices then nworker_devices_total == 2 * 4 = 8
     # If 4 workers ea. w/ 1 devices then nworker_devices_total == 4 * 1 = 4
     nworker_devices_total = len(wgdev_list)
     batch_size = batch_size * nworker_devices_total
+
+    psdev_list = cmgr_facade.get_allps_devlist()
+    print('\n\tPSDEV_LIST: {}\n'
+          .format([dev.to_string() for dev in psdev_list]))  # DEBUG
 
     # ------------------------------------ Data loading and basic preprocessing
     # The data, shuffled and split between train and test sets:
@@ -201,8 +237,9 @@ def main(argv=None):
 
     rdsetter = tf.train.replica_device_setter(
         cluster=cspec,
-        ps_strategy=ps_strategy
+        ps_strategy=ps_strategy,
         # ps_device=ps_device,  # '/job:ps/cpu:0'  # seems to work
+        # ps_device='/gpu:0'  # for gdr maybe
     )
     with tf.device(rdsetter):
         model_init = make_model(
@@ -216,12 +253,8 @@ def main(argv=None):
                                      save_best_only=True, mode='max')
         callbacks = [checkpoint]
 
-    print('\n\tCLUSTER_SPEC_DICT: {}\n\tWGDEV_LIST: {}\n'
-          .format(cmgr_facade.clusterspec_dict,
-                  [dev.to_string() for dev in wgdev_list]))  # DEBUG
-
     # Data-Parallelize the model via function or class.
-    model = make_parallel(model_init, wgdev_list)
+    model = make_parallel(model_init, wgdev_list)  # , ps_device='/gpu:0'
     print_mgpu_modelsummary(model)
 
     # ------------------------------------------------------------ Run training
@@ -273,10 +306,19 @@ def main(argv=None):
                             validation_data=(x_test, y_test),
                             callbacks=callbacks)
 
+    # Run Validation
+    if is_chief:
+        model_init.compile(loss='categorical_crossentropy',
+                           optimizer=opt,
+                           metrics=['accuracy'])
+        metrics = model_init.evaluate(
+            x=x_test, y=y_test,
+            batch_size=batch_size)
+        print('\nCIFAR VALIDATION LOSS, ACC: {}, {}'.format(*metrics))
+
     # ------------------------------------------------------------- STOP SERVER
     cmgr_facade.stop_chief(server)
 
 
 if __name__ == '__main__':
     main()
-

@@ -9,7 +9,8 @@ import traceback
 import tensorflow as tf
 
 from keras_exp.multigpu import get_available_gpus
-from keras_exp.distrib import TFClusterManagerFacade  # JobType, DevType
+from keras_exp.distrib.cluster_mgrs.tfcmgr import TFClusterManagerFacade
+# from keras_exp.distrib.cluster_mgrs.tfcmgr import JobType, DevType
 
 
 __all__ = ('test',)

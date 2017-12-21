@@ -3,6 +3,24 @@ Run Resnet50 on Imagenet data.
 
 Generate TFrecords for Imagenet data by following instructions in:
     examples/build_imagenet_data/README.md
+
+
+run:
+    # 4 GPU machine 2 sockets typically --map-by ppr:2:socket works well.
+    TMPDIR=/tmp mpirun --report-bindings \
+      --map-by ppr:2:socket -oversubscribe -np 4 python \
+      ./examples/resnet/resnet50_tfrecord_horovod.py \
+        --imgs_per_epoch=6400 # to speed up epoch
+
+    TMPDIR=/tmp mpirun --report-bindings -mca btl_tcp_if_exclude docker0,lo \
+      --bind-to none --map-by slot -np 8 \
+    run_psgcluster_singularity.sh --datamnt=/datasets \
+      --container=/cm/shared/singularity/tf1.4.0_hvd_ompi3.0.0-2017-11-23-154091b4d08c.img \
+      --venvpy=~/.virtualenvs/py-keras-gen \
+      --scripts=./examples/resnet/resnet50_tfrecord_horovod.py \
+        --datadir=/datasets/imagenet/train-val-tfrecord-480-subset \
+        --batch_size=64 --epochs=2 --imgs_per_epoch=6400 # to speed up epoch
+
 '''
 from __future__ import print_function
 import sys
@@ -234,10 +252,4 @@ def main(argv=None):
 
 
 if __name__ == '__main__':
-    # run:
-    #   # 4 GPU machine 2 sockets typically --map-by ppr:2:socket works well.
-    #   TMPDIR=/tmp mpirun --report-bindings \
-    #     --map-by ppr:2:socket -oversubscribe -np 4 python \
-    #     ./examples/resnet/resnet50_tfrecord_horovod.py \
-    #       --imgs_per_epoch=6400 # to speed up epoch
     main()

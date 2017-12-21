@@ -12,6 +12,11 @@ cd keras_experiments
 pip install -e .  # preferably in a virtualenv
 ```
 
+or install directly from github:
+```
+pip install -e git+https://github.com/avolkov1/keras_experiments.git#egg=keras_exp
+```
+
 Otherwise use `PYTHONPATH`, symlinks, etcetera to use the package within your
 python environment. Feel free to modify, copy, and do whatever you like with
 the code.
@@ -266,11 +271,11 @@ The current ```keras_exp.distrib``` implementation corresponds to
 
 The distributed examples below are for SLURM setups. To implement for another
 cluster type one would need to implement a concrete class derived from
-```keras_exp.distrib._distrib.ClusterParser``` class. I would like to add other
-clusters in the future such as Spark standalone clusters. SLURM like clusters
-i.e. PBS, UGE, etcetera, should have similar implementation to the SLURM
-```keras_exp.distrib.slurm.SlurmClusterParser``` parser. I might add a generic
-mpi4py based cluster parser as well.
+```keras_exp.distrib.cluster_parsers.base.ClusterParser``` class. I would like
+to add other clusters in the future such as Spark standalone clusters. SLURM
+like clusters i.e. PBS, UGE, etcetera, should have similar implementation to the
+SLURM ```keras_exp.distrib.cluster_parsers.slurm.SlurmClusterParser``` parser.
+I might add a generic mpi4py based cluster parser as well.
 
 The examples that follow are SLURM specific, but should be straightforward to
 adopt for other cluster types. Start with a SLURM interactive session (adopting

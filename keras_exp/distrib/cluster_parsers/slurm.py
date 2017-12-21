@@ -9,9 +9,11 @@ from __future__ import print_function
 import os
 import re
 
+# import socket
+# depends on hostlist: pip install python-hostlist
 import hostlist
 
-from ._distrib import ClusterParser
+from .base import ClusterParser
 
 
 __all__ = ('SlurmClusterParser',)
@@ -31,8 +33,13 @@ class SlurmClusterParser(ClusterParser):
         :param starting_port: Starting port for setting up jobs. Default: 2300
             TODO: Maybe use SLURM_STEP_RESV_PORTS environment if available.
                 https://stackoverflow.com/a/36803148/3457624
+
+        :param str network: Use a specific network cluster.
+            Ex. network='ib.cluster' The hosts are then specified as:
+                '{}.{}'.format(hostname, network)
     '''
-    def __init__(self, num_param_servers=-1, starting_port=2300):
+    def __init__(self, num_param_servers=-1, starting_port=2300,
+                 network=None):
         num_workers = None
         # Check Environment for all needed SLURM variables
         # SLURM_NODELIST for backwards compatability if needed.
@@ -46,6 +53,12 @@ class SlurmClusterParser(ClusterParser):
         # expands 'NAME1(x2),NAME2' -> 'NAME1,NAME1,NAME2'
         self._hostnames = hostlist.expand_hostlist(
             os.environ['SLURM_JOB_NODELIST'])
+
+        if network is not None:
+            self._hostnames = [
+                # socket.gethostbyname('{}.{}'.format(hname, network))
+                '{}.{}'.format(hname, network)
+                for hname in self._hostnames]
         # expands '1,2(x2)' -> '1,2,2'
         self._num_tasks_per_host = self._parse_slurm_tasks_per_node(
             os.environ['SLURM_TASKS_PER_NODE'])
@@ -128,7 +141,7 @@ class SlurmClusterParser(ClusterParser):
 
 
 if __name__ == '__main__':
-    # run test via: python -m keras_exp.distrib.slurm
+    # run test via: srun -l python -m keras_exp.distrib.cluster_parsers.slurm
     from ._test import test
     scpar = SlurmClusterParser()
     test(scpar)

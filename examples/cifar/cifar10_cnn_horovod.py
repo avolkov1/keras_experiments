@@ -2,11 +2,50 @@
 '''Train a simple deep CNN on the CIFAR10 small images dataset.
 
 MultiGPU Horovod implementation.
+
+Some run command examples (download data ahead of time):
+TMPDIR=/tmp mpirun --report-bindings --map-by ppr:4:socket:pe=20 \
+  -oversubscribe -np 4 python \
+  ./examples/cifar/cifar10_cnn_horovod.py --epochs=4 --aug
+
+TMPDIR=/tmp mpirun --report-bindings --bind-to none --map-by slot -np 4 \
+  python ./examples/cifar/cifar10_cnn_horovod.py --epochs=4 --aug
+
+With overubscribing if MPS is enabled (highly experimental and unstable):
+# Ex.: Assume --ntasks-per-node=8 with 4 GPUs per node using 2 nodes.
+NGPUS=4 NNODES=2 RANKS_PER_GPU=2 && \
+  TMPDIR=/tmp mpirun --report-bindings --bind-to none --map-by slot \
+  -np $(($RANKS_PER_GPU * $NNODES * $NGPUS)) \
+  python ./examples/cifar/cifar10_cnn_horovod.py --epochs=50 \
+  --nranks_per_gpu=$RANKS_PER_GPU
+
+TMPDIR=/tmp mpirun --report-bindings --bind-to none --map-by slot -np 4 \
+  python ./examples/cifar/cifar10_cnn_horovod.py --epochs=4 --aug
+
+With singularity containers:
+
+TMPDIR=/tmp mpirun --report-bindings -mca btl_tcp_if_exclude docker0,lo \
+  --bind-to none --map-by slot -np 8 singularity exec --nv \
+  /cm/shared/singularity/tf1.4.0_hvd_ompi3.0.0-2017-11-23-154091b4d08c.img \
+  bash -c 'LD_LIBRARY_PATH=/.singularity.d/libs:$LD_LIBRARY_PATH; \
+  source ~/.virtualenvs/py-keras_theano/bin/activate && \
+  python ./examples/cifar/cifar10_cnn_horovod.py --epochs=3'
+
+
+TMPDIR=/tmp mpirun --report-bindings -mca btl_tcp_if_exclude docker0,lo \
+  --bind-to none --map-by slot -np 8 \
+  run_psgcluster_singularity.sh \
+    --container=/cm/shared/singularity/tf1.4.0_hvd_ompi3.0.0-2017-11-23-154091b4d08c.img \
+    --venvpy=~/.virtualenvs/py-keras_theano \
+    --scripts=./examples/cifar/cifar10_cnn_horovod.py \
+    --epochs=20
+
 '''
 
 from __future__ import print_function
 import sys
 import os
+import time
 
 from argparse import SUPPRESS
 
@@ -39,11 +78,21 @@ def parser_(desc):
     parser = parser_def_mgpu(desc)
 
     remove_options(parser, ['--nccl', '--enqueue', '--syncopt', '--rdma',
-                            '--mgpu'])
+                            '--mgpu', '--network'])
 
     parser.add_argument(
         '--batch_size', type=int, default=32,
         help='S|Batch size. Default: %(default)s')
+
+    # parser.add_argument(
+    #     '--ngpus_per_node', type=int, default=-1,
+    #     help='S|Number of GPUs per node. Default: Horovod local_size()')
+
+    parser.add_argument(
+        '--nranks_per_gpu', type=int, default=1,
+        help='S|Number of ranks to run on each GPUs. Use this parameter to\n'
+        'oversubscribe a GPU. When oversubscribing a GPU use in combination\n'
+        'with MPS (multi-process service). Default: %(default)s')
 
     checkptfile = 'cifar10_cnn_hvd.weights.best.hdf5'
     parser.add_argument(
@@ -170,14 +219,21 @@ def main(argv=None):
     log_device_placement, allow_soft_placement = (True, True) \
         if _DEVPROF or logdevp else (False, False)
 
+    nranks_per_gpu = args.nranks_per_gpu
+    local_rank = hvd.local_rank()
+    gpu_local_rank = local_rank // nranks_per_gpu
+    print('local_rank, GPU_LOCAL_RANK: {}, {}'.format(
+        local_rank, gpu_local_rank))
+
     # Pin GPU to be used to process local rank (one GPU per process)
     config = tf.ConfigProto(log_device_placement=log_device_placement,
                             allow_soft_placement=allow_soft_placement)
     config.gpu_options.allow_growth = True
-    config.gpu_options.visible_device_list = str(hvd.local_rank())
+    # config.gpu_options.visible_device_list = str(hvd.local_rank())
+    config.gpu_options.visible_device_list = str(gpu_local_rank)
     KB.set_session(tf.Session(config=config))
 
-    ngpus = hvd.size()
+    hvdsize = hvd.size()
 
     checkpt = getattr(args, 'checkpt', None)
     checkpt_flag = False if checkpt is None else True
@@ -189,40 +245,42 @@ def main(argv=None):
     epochs = args.epochs
     data_augmentation = args.aug
 
-    logdevp = args.logdevp
-
     datadir = getattr(args, 'datadir', None)
 
     # The data, shuffled and split between train and test sets:
-    # (x_train, y_train), (x_test, y_test) = cifar10.load_data()
     (x_train, y_train), (x_test, y_test) = cifar10_load_data(datadir) \
         if datadir is not None else cifar10.load_data()
-    print(x_train.shape[0], 'train samples')
-    print(x_test.shape[0], 'test samples')
-
-    # Convert class vectors to binary class matrices.
-    y_train = to_categorical(y_train, num_classes).squeeze()
-    y_test = to_categorical(y_test, num_classes).squeeze()
+    train_samples = x_train.shape[0]
+    test_samples = x_test.shape[0]
+    steps_per_epoch = train_samples // batch_size // hvdsize
+    test_batches = test_samples // batch_size
+    print(train_samples, 'train samples')
+    print(test_samples, 'test samples')
 
     x_train = x_train.astype('float32')
     x_test = x_test.astype('float32')
     x_train /= 255
     x_test /= 255
 
+    # Convert class vectors to binary class matrices.
+    y_train = to_categorical(y_train, num_classes).squeeze()
+    y_test = to_categorical(y_test, num_classes).squeeze()
+
     callbacks = []
     if hvd.rank() == 0:
-        callbacks += [BatchTiming(), SamplesPerSec(batch_size * ngpus)]
+        callbacks += [BatchTiming(), SamplesPerSec(batch_size * hvdsize)]
 
     print(x_train.shape, 'train shape')
     # with tf.device('/cpu:0'):
     model = make_model(x_train.shape, num_classes,
                        filepath if checkpt_flag else None)
 
-    lr = 0.0001 * ngpus
+    lr = 0.0001 * hvdsize
     opt = tf.train.RMSPropOptimizer(lr)
     # Add Horovod Distributed Optimizer.
     opt = hvd.DistributedOptimizer(opt)  # , use_locking=True)
-    opt = TFOptimizer(opt)
+    opt = TFOptimizer(opt)  # Required for tf.train based optimizers
+
     # ------------------------------------- HAVE TO GET SESSION AFTER OPTIMIZER
     # sess = KB.get_session()
     # -------------------------------------------------------------------------
@@ -234,8 +292,6 @@ def main(argv=None):
     if hvd.rank() == 0:
         model.summary()
 
-    nsamples = x_train.shape[0]
-    steps_per_epoch = nsamples // batch_size // hvd.size()
     KB.get_session().run(hvd.broadcast_global_variables(0))
     if not data_augmentation:
         print('Not using data augmentation.')
@@ -248,12 +304,12 @@ def main(argv=None):
 
         train_gen = ImageDataGenerator()
         test_gen = ImageDataGenerator()
-        test_batches = x_test.shape[0] // batch_size
         # Train the model. The training will randomly sample 1 / N batches of
         # training data and 3 / N batches of validation data on every worker,
         # where N is the number of workers. Over-sampling of validation data
         # helps to increase probability that every validation example will be
         # evaluated.
+        start_time = time.time()
         model.fit_generator(
             train_gen.flow(x_train, y_train, batch_size=batch_size),
             steps_per_epoch=steps_per_epoch,
@@ -262,7 +318,7 @@ def main(argv=None):
             verbose=hvd.rank() == 0,
             validation_data=test_gen.flow(x_test, y_test,
                                           batch_size=batch_size),
-            validation_steps=3 * test_batches // hvd.size())
+            validation_steps=3 * test_batches // hvdsize)
 
     else:
         print('Using real-time data augmentation.')
@@ -287,6 +343,7 @@ def main(argv=None):
         # (std, mean, and principal components if ZCA whitening is applied).
         datagen.fit(x_train)
 
+        start_time = time.time()
         # Fit the model on the batches generated by datagen.flow().
         model.fit_generator(
             datagen.flow(x_train, y_train, batch_size=batch_size),
@@ -297,6 +354,10 @@ def main(argv=None):
             callbacks=callbacks)
 
     if hvd.rank() == 0:
+        elapsed_time = time.time() - start_time
+        print('[{}] finished in {} s'
+              .format('TRAINING', round(elapsed_time, 3)))
+
         metrics = model.evaluate(x=x_test, y=y_test, batch_size=batch_size)
         print('\nCIFAR VALIDATION LOSS, ACC: {}, {}'.format(*metrics))
 
@@ -304,10 +365,5 @@ def main(argv=None):
 
 
 if __name__ == '__main__':
-    # run:
-    #   TMPDIR=/tmp mpirun --report-bindings --map-by ppr:2:socket \
-    #     -oversubscribe -np 4 python2 \
-    #     ./examples/cifar/cifar10_cnn_horovod.py --epochs=4 --aug
-    #
     main()
 

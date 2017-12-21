@@ -6,6 +6,8 @@ from argparse import (
 # ArgumentDefaultsHelpFormatter, SUPPRESS
 from textwrap import dedent
 
+from keras_exp.distrib.cluster_mgrs.tfclusterdefs import ProtocolType
+
 
 __all__ = ('parser_def_mgpu', 'remove_options',)
 
@@ -75,8 +77,20 @@ def parser_def_mgpu(desc):
     #                          'was compiled with RDMA support.\n')
 
     parser.add_argument(
+        '--network', nargs='?', type=str, const=None, default=None,
+        help='S|Network domain to use. Ex. several nodes with hostnames:\n'
+        '    node1, node2.\n'
+        'These are hooked up to networks:\n'
+        '    node1.cm.cluster has address w.x.y.z \n'
+        '    node1.ib.cluster has address w.x.y.z \n'
+        '    node2.cm.cluster has address w.x.y.z \n'
+        '    node2.ib.cluster has address w.x.y.z \n'
+        'Then set option --network=cm.cluster or --network=ib.cluster\n'
+        'Otherwise don''t specify and some default network will be used.')
+
+    parser.add_argument(
         '--rdma', action='store', nargs='?', type=str.lower, const='verbs',
-        choices=['verbs', 'gdr'],
+        choices=[ProtocolType.verbs, ProtocolType.gdr], default=None,
         help='S|Use RDMA with Tensorflow. Requires that TF \n'
         'was compiled with RDMA support. If TF and infrastructure supports\n'
         'GPUDirect RDMA can specify gdr. Default: verbs when set.')

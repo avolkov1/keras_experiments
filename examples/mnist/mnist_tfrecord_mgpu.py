@@ -122,7 +122,7 @@ def main():
     width_ncols = 28
     batch_shape = [batch_size, height_nrows, width_ncols, 1]
     epochs = 5
-    steps_per_epoch = train_samples / batch_size
+    steps_per_epoch = train_samples // batch_size
     # validations_steps = test_samples / batch_size
     nclasses = 10
 

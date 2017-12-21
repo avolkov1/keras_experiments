@@ -61,7 +61,7 @@ nvidia-docker run --rm -ti \
 # run as user with my privileges and group mapped into the container
 # "$(hostname)_contain" \
 # nvidia-docker run --rm -ti --name=mydock \
-nvidia-docker run -d -t --name=mydock \
+nvidia-docker run -d -t --name=mydock --net=host \
   $USEROPTS \
   --hostname "$(hostname)_contain" \
   -v $PWD/passwd:/etc/passwd:ro -v $PWD/group:/etc/group:ro \
