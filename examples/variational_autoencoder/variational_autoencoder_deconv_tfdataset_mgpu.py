@@ -3,13 +3,13 @@ with Keras and deconvolution layers.
 
 Reference: "Auto-Encoding Variational Bayes" https://arxiv.org/abs/1312.6114
 
-Multigpu modifications running asynchronous training.
+Using Tensorflow queue and asynchronous training.
 
 original implementation:
 https://github.com/fchollet/keras/blob/master/examples/variational_autoencoder_deconv.py
 
-# run:
-    python ./examples/variational_autoencoder/variational_autoencoder_deconv_mgpu.py --mgpu --epochs=20  # @IgnorePep8
+run:
+    python variational_autoencoder_deconv_tfdataset_mgpu.py --mgpu --epochs=30
 '''
 
 import sys
@@ -33,6 +33,14 @@ import matplotlib.pyplot as plt
 
 from scipy.stats import norm
 
+import tensorflow as tf
+try:
+    Dataset = tf.data.Dataset
+except Exception:
+    from tensorflow.contrib.data import Dataset
+
+from keras.layers import Input
+from keras.models import Model
 from keras import backend as K
 from keras.datasets import mnist
 from keras.optimizers import RMSprop  # , TFOptimizer
@@ -42,7 +50,9 @@ from keras_exp.multigpu import make_parallel
 
 from keras_exp.callbacks.timing import BatchTiming, SamplesPerSec
 
-from vae_common import CustomFormatter, make_vae_and_codec
+from vae_common import (
+    CustomFormatter,
+    make_shared_layers_dict, make_vae, get_encoded, get_decoded)
 
 
 def parser_(desc):
@@ -111,9 +121,26 @@ def main(argv=None):
 
     print('x_train.shape:', x_train.shape)
 
-    vae_serial, encoder, generator = make_vae_and_codec(
-        original_img_size, img_chns, img_rows, img_cols, batch_size,
-        filters, num_conv, intermediate_dim, latent_dim, epsilon_std)
+    train_samples = x_train.shape[0]
+    steps_per_epoch = int(round(float(train_samples) / batch_size + 0.5))
+
+    # Create the dataset and its associated one-shot iterator.
+    buffer_size = 10000
+    dataset = Dataset.from_tensor_slices(x_train)
+    dataset = dataset.repeat()
+    dataset = dataset.shuffle(buffer_size)
+    dataset = dataset.batch(batch_size)
+    iterator = dataset.make_one_shot_iterator()
+    x_train_batch = iterator.get_next()
+
+    ldict = make_shared_layers_dict(
+        img_chns, img_rows, img_cols, batch_size, filters,
+        num_conv, intermediate_dim, latent_dim, epsilon_std)
+    # ldict is a dictionary that holds all layers. Since these layers are
+    # instantiated once, they are shared amongs vae, encoder, and generator.
+
+    x = Input(tensor=x_train_batch)
+    vae_serial = make_vae(ldict, x)
     # :  :type vae: Model
     vae = make_parallel(vae_serial, gpus_list)
 
@@ -127,17 +154,25 @@ def main(argv=None):
 
     callbacks = [BatchTiming(), SamplesPerSec(batch_size)]
 
-    vae.fit(x_train,
-            shuffle=True,
-            epochs=epochs,
-            batch_size=batch_size,
-            callbacks=callbacks)  # ,
-    # validation_data=(x_test, None))  # Not accurate for mgpu. Use vae_val.
+    # Fit the model using data from the TF data tensors.
+    vae.fit(steps_per_epoch=steps_per_epoch, epochs=epochs,
+            callbacks=callbacks)
 
-    vae_val = vae_serial
+    x = Input(shape=original_img_size)
+    vae_val = make_vae(ldict, x)
     vae_val.compile(optimizer=opt, loss=None)
     loss = vae_val.evaluate(x=x_test, y=None, batch_size=batch_size // ngpus)
     print('\n\nVAE VALIDATION LOSS: {}'.format(loss))
+
+    x = Input(shape=original_img_size)
+    z_mean, _ = get_encoded(ldict, x)
+    encoder = Model(x, z_mean)
+    # :  :type encoder: Model
+
+    decoder_input = Input(shape=(latent_dim,))
+    x_decoded_mean_squash = get_decoded(ldict, decoder_input)
+    generator = Model(decoder_input, x_decoded_mean_squash)
+    # :  :type generator: Model
 
     # display a 2D plot of the digit classes in the latent space
     x_test_encoded = encoder.predict(x_test, batch_size=batch_size)

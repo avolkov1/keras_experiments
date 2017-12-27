@@ -11,7 +11,7 @@ TMPDIR=/tmp mpirun --report-bindings --map-by ppr:4:socket:pe=20 \
 TMPDIR=/tmp mpirun --report-bindings --bind-to none --map-by slot -np 4 \
   python ./examples/cifar/cifar10_cnn_horovod.py --epochs=4 --aug
 
-With overubscribing if MPS is enabled (highly experimental and unstable):
+With oversubscribing if MPS is enabled (highly experimental and unstable):
 # Ex.: Assume --ntasks-per-node=8 with 4 GPUs per node using 2 nodes.
 NGPUS=4 NNODES=2 RANKS_PER_GPU=2 && \
   TMPDIR=/tmp mpirun --report-bindings --bind-to none --map-by slot \

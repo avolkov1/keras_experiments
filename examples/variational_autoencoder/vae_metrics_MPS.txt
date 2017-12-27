@@ -1,0 +1,59 @@
+VOLTA hsw_v100 4 GPUs per node PCIe TF1.4
+
+
+The vae network has:
+    Trainable parameters: 3,410,058
+    vae_imgs = 60k from the mnist dataset
+
+USING MPS
+variational_autoencoder_deconv_horovod.py (no tfqueue) fp32
+imgs_per_epoch_processed = np * 60k
+
+nodes    np    nranks_per_gpu   GPUs    imgs/sec     epochs    total_imgs_processed    val_loss   GPU_util%   time
+1        1     1                1       12597.28     4         4*60k                   141.7      70%         0m33.5s
+1        2     1                2       20015.69     4         4*2*60k                 141.8                  
+1        4     1                4       32482.26     4         4*4*60k                 141.4      70%         0m48.1s
+2        8     1                8       62279.30     4         4*8*60k                 141.7      70%         0m49.9s
+
+1        2     2                1       14023.56     4         4*2*60k                 142.2      80%         0m49.6s
+1        4     2                2       25689.14     4         4*4*60k                 141.3      90%         
+1        8     2                4       45605.27     4         4*8*60k                 147.6      90%         1m4.3s
+2        16    2                8       85758.70     4         4*16*60k                142.1      90%         1m8.7s
+
+1        4     4                        18006.6      4         4*4*60k                 141.8      95%         1m12s
+
+
+variational_autoencoder_deconv_tfdataset_horovod.py (with tfdataset) fp32
+imgs_per_epoch_processed = 60k
+
+1        1     1                1       12444.9      4         4*60k                   143.9      70%         0m36.7s
+1        2     1                2       20085.33     4         4*60k                   153.5                  0m30.2s
+1        4     1                4       33000        4         4*60k                   159.7                  0m28.3s
+2        8     1                8       61889.8      4         4*60k                   170.9      74%         0m25.5s
+
+1        2     2                1       13900        4         4*60k                   152.6      80%         0m34.4s
+1        4     2                2       25300        4         4*60k                   155.3      88%         0m29.5s
+1        8     2                4       44660        4         4*60k                   191.1      90%         0m30.5s
+2        16    2                8       85199        4         4*60k                   208.0      90%         0m29.8s
+
+1        4     4                1       17950        4         4*60k                   153.5      94%         0m34.2s
+1        16    4                4       47100        4         4*60k                   195.9      94%         0m57.6s
+
+
+
+COMPARISON NO MPS:
+vae_horovod.py (no tfqueue) fp32
+nodes    np    nranks_per_gpu   GPUs    imgs/sec     epochs    total_imgs_processed    val_loss   GPU_util%   time
+1        2     2                1       6200         4         4*2*60k                 142.02     94%         1m36.8s
+
+
+Explanation of the variables used in the headers:
+    total_imgs_processed = epochs * imgs_per_epoch_processed 
+
+    np = nodes * GPUs_per_node_desired * nranks_per_gpu
+
+    GPUs = GPUs used = np / nranks_per_GPU
+
+The parameter GPUs_per_node_desired can be 1 to 4 because there's a max of 4 GPUs per node.
+The parameter nranks_per_gpu lets you control how many processes to run per GPU to utilize
+(in the MPS case) the MPS service.

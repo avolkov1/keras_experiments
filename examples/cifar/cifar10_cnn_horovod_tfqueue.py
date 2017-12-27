@@ -6,12 +6,16 @@ MultiGPU Horovod implementation using TF queue.
 Use Tensorflow version 1.2.x and above for good performance.
 
 run:
-  TMPDIR=/tmp mpirun --report-bindings -np 8 --map-by ppr:4:socket \
+  TMPDIR=/tmp mpirun --report-bindings --map-by ppr:4:socket -np 8 \
     python ./examples/cifar/cifar10_cnn_horovod_tfqueue.py --epochs=50
+
+  TMPDIR=/tmp mpirun --report-bindings --bind-to none --map-by slot -np 8 \
+    python ./examples/cifar/cifar10_cnn_horovod_tfqueue.py \
+    --epochs=50 --nranks_per_gpu=2
 
 TMPDIR=/tmp mpirun --report-bindings -mca btl_tcp_if_exclude docker0,lo \
   --bind-to none --map-by slot -np 8 \
-  run_psgcluster_singularity.sh --datamnt=/cm \
+  run_psgcluster_singularity.sh \
     --container=/cm/shared/singularity/tf1.4.0_hvd_ompi3.0.0-2017-11-23-154091b4d08c.img \
     --venvpy=~/.virtualenvs/py-keras_theano \
     --scripts=./examples/cifar/cifar10_cnn_horovod_tfqueue.py \

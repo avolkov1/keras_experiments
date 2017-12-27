@@ -89,8 +89,9 @@ def parser_def_mgpu(desc):
         'Otherwise don''t specify and some default network will be used.')
 
     parser.add_argument(
-        '--rdma', action='store', nargs='?', type=str.lower, const='verbs',
-        choices=[ProtocolType.verbs, ProtocolType.gdr], default=None,
+        '--rdma', action='store', nargs='?', type=str.lower,
+        const=ProtocolType.verbs, default=None,
+        choices=[ProtocolType.verbs, ProtocolType.gdr],
         help='S|Use RDMA with Tensorflow. Requires that TF \n'
         'was compiled with RDMA support. If TF and infrastructure supports\n'
         'GPUDirect RDMA can specify gdr. Default: verbs when set.')
