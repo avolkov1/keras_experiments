@@ -185,6 +185,7 @@ class ModelMGPU(Model):
         # except KeyError:
         #     raise RuntimeError('Keyword argument "model_creator" required '
         #                        'for ModelMGPU.')
+        super(ModelMGPU, self).__init__()
 
         try:
             smodel = kwargs.pop('serial_model')
