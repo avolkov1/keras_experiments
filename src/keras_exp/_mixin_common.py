@@ -1,5 +1,4 @@
-'''
-'''
+'''Common mixin helpers.'''
 import inspect
 
 __all__ = ('mixedomatic',)
@@ -15,6 +14,7 @@ def mixedomatic(ignore_kargs_spec=False):
     are passed through unless ignore_kargs_spec is True.
     """
     def mixedomatic_(cls):
+        '''Convenience decorator to invoke the __init__ of all sup-classes.'''
         classinit = cls.__init__ if '__init__' in cls.__dict__ else None
 
         def getargs(aspec, kwargs):
@@ -50,4 +50,3 @@ def mixedomatic(ignore_kargs_spec=False):
         return cls
 
     return mixedomatic_
-

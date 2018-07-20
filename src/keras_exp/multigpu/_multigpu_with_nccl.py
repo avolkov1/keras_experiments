@@ -1,12 +1,35 @@
-# MODIFIED. Inspiration taken from the ref link below.
-# ref: https://raw.githubusercontent.com/kuza55/keras-extras/master/utils/multi_gpu.py @IgnorePep8
-# The inspirational one carried license:
-#     Apache License
-#     Version 2.0, January 2004
-# For further info refer to: https://github.com/kuza55/keras-extras
-#
-# Also used https://github.com/fchollet/keras/issues/2436 which was just
-# posted as code snippets in a forum.
+'''
+MODIFIED. Inspiration taken from the ref link below.
+ref: https://raw.githubusercontent.com/kuza55/keras-extras/master/utils/multi_gpu.py
+The inspirational one carried license:
+    Apache License
+    Version 2.0, January 2004
+For further info refer to: https://github.com/kuza55/keras-extras
+
+Also used https://github.com/fchollet/keras/issues/2436 which was just
+posted as code snippets in a forum.
+
+DEPRECATED Features:
+
+    NCCL - This module was an attempt at using Tensorflow nccl module:
+            from tensorflow.contrib import nccl
+        The nccl contrib package is broken:
+            https://github.com/tensorflow/tensorflow/issues/17908
+
+    StagingArea - It is not straightforward to use StagingArea for prefetching
+        to device (data_flow_ops.StagingArea):
+            from tensorflow.python.ops import data_flow_ops
+        Instead one can use the Tensorflow Dataset API with prefetch_to_device:
+            tf.contrib.data.prefetch_to_device
+        The StagingArea is deprecated in favor of prefetch_to_device. But
+        prefetching to device with the multigpu implementation in this module,
+        whereby a batch slicing/split layer is inserted after the input layer to
+        pipeline to each device, is not straightforward. The prefetch_to_device
+        works well with Horovod multigpu distribution where each process is
+        cleanly mapped to a GPU and it is straightforward to split the data
+        pipelilne.
+
+'''  # noqa
 from __future__ import print_function
 
 import sys
@@ -15,14 +38,16 @@ from itertools import chain
 
 import warnings
 
-from keras_exp._utils import Capturing
-
 from keras import backend as KB
 from keras.layers.core import Lambda
 from keras.models import Model
 from keras.layers.merge import Concatenate  # , Average)
 # import keras.layers as KL
 import keras.optimizers as KO
+from keras.utils import multi_gpu_model
+
+from keras_exp._utils import Capturing
+
 
 if KB.backend() == 'tensorflow':
     # Monkey patch Keras back-end to use Function with enqueue.
@@ -48,7 +73,7 @@ if KB.backend() == 'tensorflow':
 _DEBUG = False
 
 __all__ = ('get_available_gpus', 'make_parallel', 'print_mgpu_modelsummary',
-           'ModelMGPU')
+           'ModelKerasMGPU', 'ModelMGPU')
 
 
 def get_available_gpus(ngpus=-1):
@@ -78,6 +103,28 @@ def print_mgpu_modelsummary(model):
             with Capturing() as msum:
                 minfo = submodel.summary()
             print('\t{}\n\t{}\n'.format('\n\t'.join(msum), minfo))
+
+
+class ModelKerasMGPU(Model):
+    '''
+    Wrapper class around "keras.utils.multi_gpu_model". This class enabled
+    loading and saving transparently.
+    '''
+    def __init__(self, ser_model, gpus):  # @IgnorePep8 pylint: disable=super-init-not-called
+        pmodel = multi_gpu_model(ser_model, gpus)
+        # mimic copy constructor via __dict__ update, hence no super-init
+        self.__dict__.update(pmodel.__dict__)
+        self._smodel = ser_model
+
+    def __getattribute__(self, attrname):
+        '''Override load and save methods to be used from the serial-model. The
+        serial-model holds references to the weights in the multi-gpu model.
+        '''
+        # return Model.__getattribute__(self, attrname)
+        if 'load' in attrname or 'save' in attrname:
+            return getattr(self._smodel, attrname)
+
+        return super(ModelKerasMGPU, self).__getattribute__(attrname)
 
 
 def all_sync_params(tower_params, devices, usenccl=True):
@@ -221,8 +268,8 @@ class ModelMGPU(Model):
         self._enqueue_ops = []
 
         self._tower_params = []  # For init/sync'ing of parameters.
-        self._init_make_dataparallel(gdev_list, *args,
-                                     **kwargs)
+        kwargs_ = self._init_make_dataparallel(gdev_list, **kwargs)
+        super(ModelMGPU, self).__init__(*args, **kwargs_)
 
     def __getattribute__(self, attrname):
         '''Override load and save methods to be used from the serial-model. The
@@ -235,7 +282,7 @@ class ModelMGPU(Model):
         return super(ModelMGPU, self).__getattribute__(attrname)
 
     # ref: https://github.com/fchollet/keras/issues/2436
-    def _init_make_dataparallel(self, gdev_list, *args, **kwargs):
+    def _init_make_dataparallel(self, gdev_list, **kwargs):
         '''Uses data-parallelism to convert a serial model to multi-gpu. Refer
         to make_parallel doc.
         '''
@@ -342,7 +389,8 @@ class ModelMGPU(Model):
 
         kwargs['inputs'] = model.inputs
         kwargs['outputs'] = merged
-        super(ModelMGPU, self).__init__(*args, **kwargs)
+
+        return kwargs
 
     def compile(self, *args, **kwargs):
         '''Refer to Model.compile docstring for parameters. Override
@@ -490,4 +538,3 @@ def make_parallel(serial_model, gdev_list, ps_device='/cpu:0', usenccl=False,
         ps_device=ps_device,
         enqueue=enqueue, usenccl=usenccl,
         initsync=initsync, syncopt=syncopt)
-

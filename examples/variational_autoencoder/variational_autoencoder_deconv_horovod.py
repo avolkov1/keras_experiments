@@ -29,6 +29,16 @@ time TMPDIR=/tmp mpirun --report-bindings -mca btl_tcp_if_exclude docker0,lo \
     --epochs=4 \
     --nranks_per_gpu=$RANKS_PER_GPU
 
+NNODES=2 NGPUS=8 RANKS_PER_GPU=1 && \
+time TMPDIR=/tmp mpirun --report-bindings -mca btl_tcp_if_exclude docker0,lo \
+  --bind-to none --map-by slot -np $(($NNODES * $RANKS_PER_GPU * $NGPUS)) \
+  run_psgcluster_singularity.sh \
+    --container=/cm/shared/singularity/tf17.12_tf1.4.0_hvd_ompi3.0.0_ibverbs-2018-02-01-5540d30e4dc5.img \
+    --venvpy=~/.virtualenvs/py-keras-gen \
+    --scripts=./examples/variational_autoencoder/variational_autoencoder_deconv_horovod.py \
+    --epochs=4 \
+    --nranks_per_gpu=$RANKS_PER_GPU
+
 '''
 
 import sys
@@ -54,6 +64,7 @@ from scipy.stats import norm
 
 import tensorflow as tf
 import horovod.tensorflow as hvd
+import horovod.keras as hvd_keras
 
 try:
     # Initialize Horovod.
@@ -163,7 +174,8 @@ def main(argv=None):
     if hvd.rank() == 0:
         vae.summary()
 
-    callbacks = []
+    # callbacks = []
+    callbacks = [hvd_keras.callbacks.BroadcastGlobalVariablesCallback(0)]
     if hvd.rank() == 0:
         callbacks += [BatchTiming(), SamplesPerSec(batch_size * hvdsize)]
 
@@ -174,6 +186,7 @@ def main(argv=None):
             shuffle=True,
             epochs=epochs,
             batch_size=batch_size,
+            verbose=hvd.local_rank() == 0,
             validation_data=(x_test, None),
             callbacks=callbacks)
 

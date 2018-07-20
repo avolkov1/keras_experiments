@@ -3,90 +3,57 @@
 
 MultiGPU Horovod implementation.
 
-Some run command examples (download data ahead of time):
-TMPDIR=/tmp mpirun --report-bindings --map-by ppr:4:socket:pe=20 \
-  -oversubscribe -np 4 python \
-  ./examples/cifar/cifar10_cnn_horovod.py --epochs=4 --aug
+For help run:
+    python ./examples/cifar/cifar10_cnn_horovod.py --help
 
-TMPDIR=/tmp mpirun --report-bindings --bind-to none --map-by slot -np 4 \
-  python ./examples/cifar/cifar10_cnn_horovod.py --epochs=4 --aug
-
-With oversubscribing if MPS is enabled (highly experimental and unstable):
-# Ex.: Assume --ntasks-per-node=8 with 4 GPUs per node using 2 nodes.
-NGPUS=4 NNODES=2 RANKS_PER_GPU=2 && \
-  TMPDIR=/tmp mpirun --report-bindings --bind-to none --map-by slot \
-  -np $(($RANKS_PER_GPU * $NNODES * $NGPUS)) \
-  python ./examples/cifar/cifar10_cnn_horovod.py --epochs=50 \
-  --nranks_per_gpu=$RANKS_PER_GPU
-
-TMPDIR=/tmp mpirun --report-bindings --bind-to none --map-by slot -np 4 \
-  python ./examples/cifar/cifar10_cnn_horovod.py --epochs=4 --aug
-
-With singularity containers:
-
-TMPDIR=/tmp mpirun --report-bindings -mca btl_tcp_if_exclude docker0,lo \
-  --bind-to none --map-by slot -np 8 singularity exec --nv \
-  /cm/shared/singularity/tf1.4.0_hvd_ompi3.0.0-2017-11-23-154091b4d08c.img \
-  bash -c 'LD_LIBRARY_PATH=/.singularity.d/libs:$LD_LIBRARY_PATH; \
-  source ~/.virtualenvs/py-keras_theano/bin/activate && \
-  python ./examples/cifar/cifar10_cnn_horovod.py --epochs=3'
-
-
-TMPDIR=/tmp mpirun --report-bindings -mca btl_tcp_if_exclude docker0,lo \
-  --bind-to none --map-by slot -np 8 \
-  run_psgcluster_singularity.sh \
-    --container=/cm/shared/singularity/tf1.4.0_hvd_ompi3.0.0-2017-11-23-154091b4d08c.img \
-    --venvpy=~/.virtualenvs/py-keras_theano \
-    --scripts=./examples/cifar/cifar10_cnn_horovod.py \
-    --epochs=20
+General example of run command:
+NGPUS=4 NNODES=1 RANKS_PER_GPU=1 np=$(($RANKS_PER_GPU * $NNODES * $NGPUS)) && \
+    TMPDIR=/tmp mpirun -x NCCL_RINGS="$( seq -s' ' 0 $((np - 1)) )"  \
+    --report-bindings --bind-to none --map-by slot -np ${np} \
+    python ./examples/cifar/cifar10_cnn_horovod.py --epochs=5 \
+    --nranks_per_gpu=$RANKS_PER_GPU
 
 '''
-
 from __future__ import print_function
 import sys
-import os
 import time
-
-from argparse import SUPPRESS
-
-import numpy as np
-
-from parser_common import parser_def_mgpu, remove_options
 
 import tensorflow as tf
 import horovod.tensorflow as hvd
+import horovod.keras as hvd_keras
 
-# from keras.utils.data_utils import get_file
-from keras.utils import to_categorical
-from keras.datasets import cifar10
-from keras.preprocessing.image import ImageDataGenerator
-from keras.models import Sequential
-import keras.layers as KL
 from keras import backend as KB
+from keras.models import Model
+import keras.layers as KL
+from keras.utils import to_categorical
+# import keras.optimizers as KO
+import keras.losses as keras_losses
+from keras.preprocessing.image import ImageDataGenerator
 
-# from keras.callbacks import ModelCheckpoint
-
-from keras.optimizers import TFOptimizer
+from keras.callbacks import ModelCheckpoint
 
 from keras_exp.callbacks.timing import SamplesPerSec, BatchTiming
+
+from cifar_common import (
+    CifarTrainDefaults, make_model, cifar10_load_data, wrap_as_tfdataset,
+    print_rank0)
+
+from parser_common import parser_def_mgpu, remove_options
 
 
 _DEVPROF = False
 
 
 def parser_(desc):
+    '''Parser for Cifar10 CNN Horovod training script.'''
     parser = parser_def_mgpu(desc)
 
     remove_options(parser, ['--nccl', '--enqueue', '--syncopt', '--rdma',
                             '--mgpu', '--network'])
 
     parser.add_argument(
-        '--batch_size', type=int, default=32,
+        '--batch_size', type=int, default=CifarTrainDefaults.batch_size,
         help='S|Batch size. Default: %(default)s')
-
-    # parser.add_argument(
-    #     '--ngpus_per_node', type=int, default=-1,
-    #     help='S|Number of GPUs per node. Default: Horovod local_size()')
 
     parser.add_argument(
         '--nranks_per_gpu', type=int, default=1,
@@ -97,7 +64,7 @@ def parser_(desc):
     checkptfile = 'cifar10_cnn_hvd.weights.best.hdf5'
     parser.add_argument(
         '--checkpt', action='store', nargs='?',
-        const=checkptfile, default=SUPPRESS,
+        const=checkptfile,
         help='S|Save (overwrites) and load the model weights if available.'
         '\nOptionally specify a file/filepath if the default name is '
         'undesired.\n(default: {})'.format(checkptfile))
@@ -108,108 +75,28 @@ def parser_(desc):
     parser.add_argument('--logdevp', action='store_true', default=False,
                         help='S|Log device placement in Tensorflow.\n')
 
-    parser.add_argument('--datadir', default=SUPPRESS,
-                        help='Data directory with Cifar10 dataset.')
+    parser.add_argument(
+        '--datadir',
+        help='S|Data directory with Cifar10 dataset. Otherwise Keras\n'
+        'downloads to "<HOME>/.keras/datasets" directory by default.')
+
+    parser.add_argument(
+        '--use-dataset-api', action='store_true', default=False,
+        help='S|Use Tensorflow Dataset API for Keras model training.')
 
     args = parser.parse_args()
 
     return args
 
 
-def make_model(inshape, num_classes, weights_file=None):
-    return make_model_full(inshape, num_classes, weights_file)
-    # return make_model_small(inshape, num_classes, weights_file)
-
-
-def make_model_full(inshape, num_classes, weights_file=None):
-    model = Sequential()
-    model.add(KL.InputLayer(input_shape=inshape[1:]))
-    # model.add(KL.Conv2D(32, (3, 3), padding='same', input_shape=inshape[1:]))
-    model.add(KL.Conv2D(32, (3, 3), padding='same'))
-    model.add(KL.Activation('relu'))
-    model.add(KL.Conv2D(32, (3, 3)))
-    model.add(KL.Activation('relu'))
-    model.add(KL.MaxPooling2D(pool_size=(2, 2)))
-    model.add(KL.Dropout(0.25))
-
-    model.add(KL.Conv2D(64, (3, 3), padding='same'))
-    model.add(KL.Activation('relu'))
-    model.add(KL.Conv2D(64, (3, 3)))
-    model.add(KL.Activation('relu'))
-    model.add(KL.MaxPooling2D(pool_size=(2, 2)))
-    model.add(KL.Dropout(0.25))
-
-    model.add(KL.Flatten())
-    model.add(KL.Dense(512))
-    model.add(KL.Activation('relu'))
-    model.add(KL.Dropout(0.5))
-    model.add(KL.Dense(num_classes))
-    model.add(KL.Activation('softmax'))
-
-    if weights_file is not None and os.path.exists(weights_file):
-        model.load_weights(weights_file)
-
-    return model
-
-
-def make_model_small(inshape, num_classes, weights_file=None):
-    model = Sequential()
-    model.add(KL.InputLayer(input_shape=inshape[1:]))
-    model.add(KL.Conv2D(32, (3, 3), padding='same'))
-    model.add(KL.Activation('relu'))
-    model.add(KL.Flatten())
-    # model.add(Dropout(0.5))
-    model.add(KL.Dense(num_classes))
-    model.add(KL.Activation('softmax'))
-
-    if weights_file is not None and os.path.exists(weights_file):
-        model.load_weights(weights_file)
-
-    return model
-
-
-def cifar10_load_data(path):
-    """Loads CIFAR10 dataset.
-
-    # Returns
-        Tuple of Numpy arrays: `(x_train, y_train), (x_test, y_test)`.
-    """
-    dirname = 'cifar-10-batches-py'
-    # origin = 'http://www.cs.toronto.edu/~kriz/cifar-10-python.tar.gz'
-    # path = get_file(dirname, origin=origin, untar=True)
-    path_ = os.path.join(path, dirname)
-
-    num_train_samples = 50000
-
-    x_train = np.zeros((num_train_samples, 3, 32, 32), dtype='uint8')
-    y_train = np.zeros((num_train_samples,), dtype='uint8')
-
-    for i in range(1, 6):
-        fpath = os.path.join(path_, 'data_batch_' + str(i))
-        data, labels = cifar10.load_batch(fpath)
-        x_train[(i - 1) * 10000: i * 10000, :, :, :] = data
-        y_train[(i - 1) * 10000: i * 10000] = labels
-
-    fpath = os.path.join(path_, 'test_batch')
-    x_test, y_test = cifar10.load_batch(fpath)
-
-    y_train = np.reshape(y_train, (len(y_train), 1))
-    y_test = np.reshape(y_test, (len(y_test), 1))
-
-    if KB.image_data_format() == 'channels_last':
-        x_train = x_train.transpose(0, 2, 3, 1)
-        x_test = x_test.transpose(0, 2, 3, 1)
-
-    return (x_train, y_train), (x_test, y_test)
-
-
 def main(argv=None):
+    '''Train a simple deep CNN on the CIFAR10 small images dataset on multigpu
+    (and optionally multinode+multigpu) systems via Horovod implementation.
     '''
-    '''
-    main.__doc__ = __doc__
     argv = sys.argv if argv is None else sys.argv.extend(argv)
-    desc = main.__doc__  # .format(os.path.basename(__file__))
+    desc = main.__doc__
     # CLI parser
+    # args = parser_(argv[1:], desc)
     args = parser_(desc)
 
     # Initialize Horovod.
@@ -225,37 +112,46 @@ def main(argv=None):
     print('local_rank, GPU_LOCAL_RANK: {}, {}'.format(
         local_rank, gpu_local_rank))
 
-    # Pin GPU to be used to process local rank (one GPU per process)
-    config = tf.ConfigProto(log_device_placement=log_device_placement,
-                            allow_soft_placement=allow_soft_placement)
-    config.gpu_options.allow_growth = True
-    # config.gpu_options.visible_device_list = str(hvd.local_rank())
-    config.gpu_options.visible_device_list = str(gpu_local_rank)
+    # Pin GPU to local rank. Typically one GPU per process unless
+    # oversubscribing GPUs (experimental MPS). In model parallelism it's
+    # possible to have multiple GPUs per process.
+    # visible_device_list = str(hvd.local_rank()
+    gpu_options = tf.GPUOptions(
+        allow_growth=True,
+        visible_device_list=str(gpu_local_rank))
+    config = tf.ConfigProto(
+        log_device_placement=log_device_placement,
+        allow_soft_placement=allow_soft_placement,
+        gpu_options=gpu_options)
     KB.set_session(tf.Session(config=config))
 
     hvdsize = hvd.size()
 
-    checkpt = getattr(args, 'checkpt', None)
-    checkpt_flag = False if checkpt is None else True
+    checkpt = args.checkpt
     filepath = checkpt
-    # print('CHECKPT:', checkpt)
 
     batch_size = args.batch_size
     num_classes = 10
     epochs = args.epochs
-    data_augmentation = args.aug
 
-    datadir = getattr(args, 'datadir', None)
+    datadir = args.datadir
 
     # The data, shuffled and split between train and test sets:
-    (x_train, y_train), (x_test, y_test) = cifar10_load_data(datadir) \
-        if datadir is not None else cifar10.load_data()
+    if hvd.rank() == 0:
+        # download only in rank0 i.e. single process
+        (x_train, y_train), (x_test, y_test) = cifar10_load_data(datadir)
+
+    hvd_keras.allreduce([0], name="Barrier")
+    if hvd.rank() != 0:
+        # Data should be downloaded already so load in the other ranks.
+        (x_train, y_train), (x_test, y_test) = cifar10_load_data(datadir)
+
     train_samples = x_train.shape[0]
     test_samples = x_test.shape[0]
     steps_per_epoch = train_samples // batch_size // hvdsize
-    test_batches = test_samples // batch_size
-    print(train_samples, 'train samples')
-    print(test_samples, 'test samples')
+
+    print_rank0('{} train samples'.format(train_samples), hvd)
+    print_rank0('{} test samples'.format(test_samples), hvd)
 
     x_train = x_train.astype('float32')
     x_test = x_test.astype('float32')
@@ -263,107 +159,141 @@ def main(argv=None):
     x_test /= 255
 
     # Convert class vectors to binary class matrices.
-    y_train = to_categorical(y_train, num_classes).squeeze()
-    y_test = to_categorical(y_test, num_classes).squeeze()
+    y_train = to_categorical(y_train, num_classes)
+    y_test = to_categorical(y_test, num_classes)
 
-    callbacks = []
-    if hvd.rank() == 0:
-        callbacks += [BatchTiming(), SamplesPerSec(batch_size * hvdsize)]
+    if not args.use_dataset_api:
+        traingen = ImageDataGenerator()
+        if args.aug:
+            print_rank0('Using real-time data augmentation.', hvd)
+            # This will do preprocessing and realtime data augmentation:
+            traingen = ImageDataGenerator(
+                # set input mean to 0 over the dataset
+                featurewise_center=False,
+                # set each sample mean to 0
+                samplewise_center=False,
+                # divide inputs by std of the dataset
+                featurewise_std_normalization=False,
+                # divide each input by its std
+                samplewise_std_normalization=False,
+                # apply ZCA whitening
+                zca_whitening=False,
+                # randomly rotate images in the range (degrees, 0 to 180)
+                rotation_range=0,
+                # randomly shift images horizontally (fraction of total width)
+                width_shift_range=0.1,
+                # randomly shift images vertically (fraction of total height)
+                height_shift_range=0.1,
+                # randomly flip images
+                horizontal_flip=True,
+                # randomly flip images
+                vertical_flip=False)
 
-    print(x_train.shape, 'train shape')
-    # with tf.device('/cpu:0'):
-    model = make_model(x_train.shape, num_classes,
-                       filepath if checkpt_flag else None)
+            # Compute quantities required for feature-wise normalization
+            # (std, mean, and principal components if ZCA whitening is applied)
+            traingen.fit(x_train)
 
-    lr = 0.0001 * hvdsize
-    opt = tf.train.RMSPropOptimizer(lr)
-    # Add Horovod Distributed Optimizer.
-    opt = hvd.DistributedOptimizer(opt)  # , use_locking=True)
-    opt = TFOptimizer(opt)  # Required for tf.train based optimizers
+        model = make_model(
+            x_train.shape[1:], num_classes, filepath)
+    else:
+        print_rank0('USING TF DATASET API.', hvd)
+        dataset = wrap_as_tfdataset(
+            x_train, y_train, args.aug, batch_size, gpu_local_rank,
+            prefetch_to_device=True, comm=hvd_keras)
+        iterator = dataset.make_one_shot_iterator()
 
-    # ------------------------------------- HAVE TO GET SESSION AFTER OPTIMIZER
-    # sess = KB.get_session()
-    # -------------------------------------------------------------------------
+        # Model creation using tensors from the get_next() graph node.
+        inputs, targets = iterator.get_next()
+        x_train_input = KL.Input(tensor=inputs)
+
+        model_init = make_model(x_train_input, num_classes, filepath)
+        x_train_out = model_init.output
+
+        model = Model(inputs=[x_train_input], outputs=[x_train_out])
 
     # Let's train the model using RMSprop
-    model.compile(loss='categorical_crossentropy',
-                  optimizer=opt,
-                  metrics=['accuracy'])
+    lr = 0.0001 * hvdsize
+
+    # opt = KO.RMSprop(lr=lr, decay=1e-6)
+    # opt = hvd_keras.DistributedOptimizer(opt)
+
+    opt = tf.train.RMSPropOptimizer(lr)
+    # Add Horovod Distributed Optimizer.
+    opt = hvd.DistributedOptimizer(opt)
+
+    model.compile(
+        loss=keras_losses.categorical_crossentropy,
+        optimizer=opt,
+        metrics=['accuracy'],
+        target_tensors=None if not args.use_dataset_api else [targets])
+
     if hvd.rank() == 0:
         model.summary()
 
+    callbacks = []
+    if checkpt and hvd.rank() == 0:
+        checkpoint = ModelCheckpoint(
+            filepath, monitor='loss', mode='min', verbose=1,
+            save_best_only=True)
+        callbacks.append(checkpoint)
+
+    if hvd.rank() == 0:
+        callbacks += [BatchTiming(), SamplesPerSec(batch_size * hvdsize)]
+
+    # Broadcast initial variable states from rank 0 to all other procs.
+    # This is necessary to ensure consistent initialization of all
+    # workers when training is started with random weights or restored
+    # from a checkpoint.
+    # Callback when using horovod.keras as hvd
+    # callbacks.append(hvd.callbacks.BroadcastGlobalVariablesCallback(0))
     KB.get_session().run(hvd.broadcast_global_variables(0))
-    if not data_augmentation:
-        print('Not using data augmentation.')
-        # model.fit(x_train, y_train,
-        #           batch_size=batch_size,
-        #           epochs=epochs,
-        #           validation_data=(x_test, y_test),
-        #           shuffle=True,
-        #           callbacks=callbacks)
 
-        train_gen = ImageDataGenerator()
-        test_gen = ImageDataGenerator()
-        # Train the model. The training will randomly sample 1 / N batches of
-        # training data and 3 / N batches of validation data on every worker,
-        # where N is the number of workers. Over-sampling of validation data
-        # helps to increase probability that every validation example will be
-        # evaluated.
+    if not args.use_dataset_api:
         start_time = time.time()
+        # Fit the model on the batches generated by traingen.flow().
         model.fit_generator(
-            train_gen.flow(x_train, y_train, batch_size=batch_size),
+            traingen.flow(x_train, y_train, batch_size=batch_size),
             steps_per_epoch=steps_per_epoch,
-            callbacks=callbacks,
             epochs=epochs,
+            validation_data=(x_test, y_test) if hvd.rank() == 0 else None,
             verbose=hvd.rank() == 0,
-            validation_data=test_gen.flow(x_test, y_test,
-                                          batch_size=batch_size),
-            validation_steps=3 * test_batches // hvdsize)
-
+            callbacks=callbacks)
     else:
-        print('Using real-time data augmentation.')
-        # This will do preprocessing and realtime data augmentation:
-        datagen = ImageDataGenerator(
-            featurewise_center=False,  # set input mean to 0 over the dataset
-            samplewise_center=False,  # set each sample mean to 0
-            # divide inputs by std of the dataset
-            featurewise_std_normalization=False,
-            samplewise_std_normalization=False,  # divide each input by its std
-            zca_whitening=False,  # apply ZCA whitening
-            # randomly rotate images in the range (degrees, 0 to 180)
-            rotation_range=0,
-            # randomly shift images horizontally (fraction of total width)
-            width_shift_range=0.1,
-            # randomly shift images vertically (fraction of total height)
-            height_shift_range=0.1,
-            horizontal_flip=True,  # randomly flip images
-            vertical_flip=False)  # randomly flip images
-
-        # Compute quantities required for feature-wise normalization
-        # (std, mean, and principal components if ZCA whitening is applied).
-        datagen.fit(x_train)
-
+        # augmentation incorporated in the Dataset pipeline
         start_time = time.time()
-        # Fit the model on the batches generated by datagen.flow().
-        model.fit_generator(
-            datagen.flow(x_train, y_train, batch_size=batch_size),
+        # Validation during training can be incorporated via callback:
+        # noqa ref: https://github.com/keras-team/keras/blob/c8bef99ec7a2032b9bea6e9a1260d05a2b6a80f1/examples/mnist_tfrecord.py#L56
+        model.fit(
             steps_per_epoch=steps_per_epoch,
             epochs=epochs,
-            validation_data=(x_test, y_test),
             verbose=hvd.rank() == 0,
             callbacks=callbacks)
 
-    if hvd.rank() == 0:
-        elapsed_time = time.time() - start_time
-        print('[{}] finished in {} s'
-              .format('TRAINING', round(elapsed_time, 3)))
+    if hvd.rank() != 0:
+        return
 
-        metrics = model.evaluate(x=x_test, y=y_test, batch_size=batch_size)
-        print('\nCIFAR VALIDATION LOSS, ACC: {}, {}'.format(*metrics))
+    elapsed_time = time.time() - start_time
+    print('[{}] finished in {} s'
+          .format('TRAINING', round(elapsed_time, 3)))
 
-    KB.clear_session()
+    test_model = model
+    if args.use_dataset_api:
+        # Create a test-model without Dataset pipeline in the model graph.
+        test_model = make_model(x_test.shape[1:], num_classes)
+        test_model.compile(
+            loss=keras_losses.categorical_crossentropy,
+            optimizer=opt,
+            metrics=['accuracy'])
+        print('SETTING WEIGHTS FOR EVAL WITH DATASET API...')
+        test_model.set_weights(model.get_weights())
+        print('WEIGHTS SET!!!')
+
+    metrics = test_model.evaluate(x_test, y_test)
+    print('\nCIFAR VALIDATION LOSS, ACC: {}, {}'.format(*metrics))
 
 
 if __name__ == '__main__':
     main()
-
+    # join all ranks and cleanup Keras/Tensorflow session.
+    hvd_keras.allreduce([0], name="Barrier")
+    KB.clear_session()

@@ -1,9 +1,12 @@
 from setuptools import setup, find_packages
 
-_pkgname = 'keras_exp'
-packages_list = [_pkgname] + \
-    ['{}.{}'.format(_pkgname, subpkg)
-     for subpkg in find_packages(where=_pkgname)]
+# _pkgname = 'keras_exp'
+# packages_list = [_pkgname] + \
+#     ['{}.{}'.format(_pkgname, subpkg)
+#      for subpkg in find_packages(where=_pkgname)]
+
+_srcdir = 'src'
+packages_list = [subpkg for subpkg in find_packages(where=_srcdir)]
 
 setup(
     name='keras_exp',
@@ -11,6 +14,7 @@ setup(
     description='Experimental Keras libraries and examples.',
     author='Alex Volkov',
     url='https://github.com/avolkov1/keras_experiments',
+    package_dir={'': _srcdir},
     packages=packages_list,
     license='unlicense.org',
     classifiers=[  # https://pypi.python.org/pypi?%3Aaction=list_classifiers

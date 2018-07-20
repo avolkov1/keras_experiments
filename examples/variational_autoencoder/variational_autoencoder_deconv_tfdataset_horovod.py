@@ -20,8 +20,8 @@ run:
       python ./examples/variational_autoencoder/variational_autoencoder_deconv_tfdataset_horovod.py \
       --epochs=30  --nranks_per_gpu=1
 
-'''
-
+'''  # noqa
+from __future__ import print_function
 import sys
 import argparse as ap
 

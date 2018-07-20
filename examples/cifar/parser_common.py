@@ -1,4 +1,5 @@
 '''
+Common command line interface parser utils.
 '''
 from argparse import (
     HelpFormatter, RawDescriptionHelpFormatter,
@@ -7,12 +8,13 @@ from argparse import (
 from textwrap import dedent
 
 from keras_exp.distrib.cluster_mgrs.tfclusterdefs import ProtocolType
-
+from cifar_common import CifarTrainDefaults
 
 __all__ = ('parser_def_mgpu', 'remove_options',)
 
 
 class SmartFormatterMixin(HelpFormatter):
+    '''Arguments parser formatter that splits on \n. Start help with "S|".'''
     # ref:
     # http://stackoverflow.com/questions/3853722/python-argparse-how-to-insert-newline-in-the-help-text
     # @IgnorePep8
@@ -47,28 +49,15 @@ def parser_def_mgpu(desc):
         # if mgpu is not specified then defaults to 0 - single gpu
         # mgpu = 0 if getattr(args, 'mgpu', None) is None else args.mgpu
         # default=SUPPRESS,
-        help='S|Run on multiple-GPUs using all available GPUs on a system. If'
-        '\nnot passed does not use multiple GPU. If passed uses all GPUs.'
-        '\nOptionally specify a number to use that many GPUs. Another approach'
-        '\nis to specify CUDA_VISIBLE_DEVICES=0,1,... when calling script and'
-        '\nspecify --mgpu to use this specified device list.'
-        '\nThis option is only supported with TensorFlow backend.')
+        help='S|Run on multiple-GPUs using all available GPUs on a system.\n'
+        'If not passed does not use multiple GPU. If passed uses all GPUs.\n'
+        'Optionally specify a number to use that many GPUs. Another approach\n'
+        'is to specify CUDA_VISIBLE_DEVICES=0,1,... when calling script and\n'
+        'specify --mgpu to use this specified device list.\n'
+        'This option is only supported with TensorFlow backend.\n')
 
     parser.add_argument(
-        '--enqueue', action='store_true', default=False,
-        help='S|Use StagingArea in multi-gpu model. Default: %(default)s\n')
-
-    parser.add_argument(
-        '--syncopt', action='store_true', default=False,
-        help='S|Use gradient synchronization in Optimizer. '
-        'Default: %(default)s')
-
-    parser.add_argument(
-        '--nccl', action='store_true', default=False,
-        help='S|Use NCCL contrib lib. Default: %(default)s')
-
-    parser.add_argument(
-        '--epochs', type=int, default=200,
+        '--epochs', type=int, default=CifarTrainDefaults.epochs,
         help='S|Number of epochs to run training for.\n'
         '(Default: %(default)s)\n')
 
@@ -100,10 +89,10 @@ def parser_def_mgpu(desc):
 
 
 def remove_options(parser, options):
+    '''Remove options from an ArgumentParser parser object.'''
     # ref: https://stackoverflow.com/a/36863647/3457624
     for option in options:
         for action in parser._actions:
             if vars(action)['option_strings'][0] == option:
                 parser._handle_conflict_resolve(None, [(option, action)])
                 break
-

@@ -12,14 +12,23 @@ run:
       ./examples/resnet/resnet50_tfrecord_horovod.py \
         --imgs_per_epoch=6400 # to speed up epoch
 
-    TMPDIR=/tmp mpirun --report-bindings -mca btl_tcp_if_exclude docker0,lo \
-      --bind-to none --map-by slot -np 8 \
-    run_psgcluster_singularity.sh --datamnt=/datasets \
-      --container=/cm/shared/singularity/tf1.4.0_hvd_ompi3.0.0-2017-11-23-154091b4d08c.img \
-      --venvpy=~/.virtualenvs/py-keras-gen \
-      --scripts=./examples/resnet/resnet50_tfrecord_horovod.py \
-        --datadir=/datasets/imagenet/train-val-tfrecord-480-subset \
-        --batch_size=64 --epochs=2 --imgs_per_epoch=6400 # to speed up epoch
+TMPDIR=/tmp mpirun --report-bindings -mca btl_tcp_if_exclude docker0,lo \
+  --bind-to none --map-by slot -np 8 \
+run_psgcluster_singularity.sh --datamnt=/datasets \
+  --container=/cm/shared/singularity/tf1.4.0_hvd_ompi3.0.0-2017-11-23-154091b4d08c.img \
+  --venvpy=~/.virtualenvs/py-keras-gen \
+  --scripts=./examples/resnet/resnet50_tfrecord_horovod.py \
+    --datadir=/datasets/imagenet/train-val-tfrecord-480-subset \
+    --batch_size=64 --epochs=2 --imgs_per_epoch=6400 # to speed up epoch
+
+TMPDIR=/tmp mpirun --report-bindings -mca btl_tcp_if_exclude docker0,lo \
+  --bind-to none --map-by slot -np 8 \
+run_psgcluster_singularity.sh --datamnts=/datasets \
+  --container=/cm/shared/singularity/tf17.12_tf1.4.0_hvd_ompi3.0.0_ibverbs-2018-02-01-5540d30e4dc5.img \
+  --venvpy=~/.virtualenvs/py-keras-gen \
+  --scripts=./examples/resnet/resnet50_tfrecord_horovod.py \
+    --datadir=/datasets/imagenet/train-val-tfrecord-480-subset \
+    --batch_size=64 --epochs=2 --imgs_per_epoch=6400 # to speed up epoch
 
 '''
 from __future__ import print_function

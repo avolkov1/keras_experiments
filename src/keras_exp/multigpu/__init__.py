@@ -1,4 +1,4 @@
-
+'''Multigpu package for Keras'''
 
 from ._multigpu import *
 
@@ -19,4 +19,3 @@ from ._multigpu import *
 #
 #
 # del _im
-

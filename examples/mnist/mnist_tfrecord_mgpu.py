@@ -34,11 +34,14 @@ the model and batch sizes are signifcantly large, using multigpu with TFRecord
 queue can give additional performance boost to Keras.
 
 '''
+from __future__ import print_function
 import time
 
 import numpy as np
 
 import tensorflow as tf
+from tensorflow.contrib.learn.python.learn.datasets import mnist
+
 from keras import backend as KB
 from keras.models import Model
 from keras.layers import (
@@ -52,8 +55,6 @@ from keras.callbacks import ModelCheckpoint
 
 from keras.utils import to_categorical
 
-from tensorflow.contrib.learn.python.learn.datasets import mnist
-
 from keras_exp.multigpu import (
     get_available_gpus, make_parallel, print_mgpu_modelsummary)
 
@@ -66,6 +67,7 @@ if KB.backend() != 'tensorflow':
 
 
 def cnn_layers_list(nclasses):
+    '''List of instantitated cnn layers to use for the mnist data.'''
     ll = []
     ll.append(Conv2D(32, (3, 3), activation='relu', padding='valid'))
     ll.append(Conv2D(64, (3, 3), activation='relu'))
@@ -80,12 +82,13 @@ def cnn_layers_list(nclasses):
 
 
 def cnn_layers(x_train_input, nclasses):
+    '''Create a model via functional API using cnn layers.'''
     ll = cnn_layers_list(nclasses)
-    x = x_train_input
+    xi = x_train_input
     for il in ll:
-        x = il(x)
+        xi = il(xi)
 
-    return x
+    return xi
 
 
 def make_model(x_train_input, nclasses):
@@ -261,4 +264,3 @@ def main():
 
 if __name__ == '__main__':
     main()
-

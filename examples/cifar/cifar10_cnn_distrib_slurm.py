@@ -20,19 +20,16 @@ run:
 from __future__ import print_function
 
 import sys
-import os
 
 from argparse import SUPPRESS
 
 # from time import sleep
 
-from parser_common import (parser_def_mgpu, remove_options)
+import tensorflow as tf
 
 from keras.utils import to_categorical
 from keras.datasets import cifar10
 from keras.preprocessing.image import ImageDataGenerator
-from keras.models import Sequential
-import keras.layers as KL
 from keras import backend as KB
 
 from keras.callbacks import ModelCheckpoint
@@ -42,12 +39,15 @@ from keras.optimizers import RMSprop
 from keras_exp.multigpu import (get_available_gpus, print_mgpu_modelsummary)
 from keras_exp.multigpu import make_parallel
 
-import tensorflow as tf
-
-from keras_exp.distrib.cluster_parsers.slurm import SlurmClusterParser
 from keras_exp.distrib.cluster_mgrs.tfcmgr import (
     TFClusterManagerFacade, JobType)  # , DevType
 from keras_exp.distrib.cluster_mgrs.tfclusterdefs import ProtocolType
+
+
+from keras_exp.distrib.cluster_parsers.slurm import SlurmClusterParser
+from cifar_common import make_model
+
+from parser_common import (parser_def_mgpu, remove_options)
 
 # from functools import partial
 
@@ -55,8 +55,9 @@ _DEVPROF = False
 
 
 def parser_(desc):
+    '''CLI Parser for options to run Tensorflow over SLURM cluster.'''
     parser = parser_def_mgpu(desc)
-    remove_options(parser, ['--mgpu', '--nccl'])
+    remove_options(parser, ['--mgpu', '--nccl', '--enqueue'])
 
     checkptfile = 'cifar10_cnn_distrib.weights.best.hdf5'
     parser.add_argument(
@@ -77,50 +78,15 @@ def parser_(desc):
     return args
 
 
-def make_model(inshape, num_classes, weights_file=None):
-    model = Sequential()
-    model.add(KL.InputLayer(input_shape=inshape[1:]))
-    # model.add(KL.Conv2D(32, (3, 3), padding='same', input_shape=inshape[1:]))
-    model.add(KL.Conv2D(32, (3, 3), padding='same'))
-    model.add(KL.Activation('relu'))
-    model.add(KL.Conv2D(32, (3, 3)))
-    model.add(KL.Activation('relu'))
-    model.add(KL.MaxPooling2D(pool_size=(2, 2)))
-    model.add(KL.Dropout(0.25))
-
-    model.add(KL.Conv2D(64, (3, 3), padding='same'))
-    model.add(KL.Activation('relu'))
-    model.add(KL.Conv2D(64, (3, 3)))
-    model.add(KL.Activation('relu'))
-    model.add(KL.MaxPooling2D(pool_size=(2, 2)))
-    model.add(KL.Dropout(0.25))
-
-    model.add(KL.Flatten())
-    model.add(KL.Dense(512))
-    model.add(KL.Activation('relu'))
-    model.add(KL.Dropout(0.5))
-    model.add(KL.Dense(num_classes))
-    model.add(KL.Activation('softmax'))
-
-    if weights_file is not None and os.path.exists(weights_file):
-        model.load_weights(weights_file)
-
-    return model
-
-
 def main(argv=None):
-    '''
-    '''
+    '''Train a simple deep CNN on the CIFAR10 small images dataset on a SLURM
+    cluster.'''
     main.__doc__ = __doc__
 
     argv = sys.argv if argv is None else sys.argv.extend(argv)
     desc = main.__doc__  # .format(os.path.basename(__file__))
     # CLI parser
     args = parser_(desc)
-    # mgpu = 0 if getattr(args, 'mgpu', None) is None else args.mgpu
-    # enqueue = args.enqueue
-    # usenccl = args.nccl
-    # syncopt = args.syncopt
     # print('RDMA: {}'.format(args.rdma))
     # rdma = getattr(args, 'rdma', None)
     rdma = args.rdma
@@ -243,7 +209,7 @@ def main(argv=None):
     )
     with tf.device(rdsetter):
         model_init = make_model(
-            x_train.shape, num_classes,
+            x_train.shape[1:], num_classes,
             filepath if checkpt_flag else None
         )
 

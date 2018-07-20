@@ -1,6 +1,18 @@
+'''
+Deprecated monkey patch.
+
+Monkey patch Keras back-end to use Function with enqueue.
+    import keras_exp._patch_tf_backend as tfbpatch
+    tfbpatch.patch()
+or
+    from keras_exp._patch_tf_backend import patch as tfbpatch
+    tfbpatch()
+
+'''
 from __future__ import print_function
 
 import sys
+import atexit
 import numpy as np
 import tensorflow as tf
 
@@ -8,7 +20,6 @@ from keras.backend import tensorflow_backend as tfb
 from keras.backend.tensorflow_backend import (
     get_session, is_sparse)
 
-import atexit
 atexit.register(tfb.clear_session)
 # FIXME: The monkey patch of Function results in an error message at the end of
 #     the session. Message:
@@ -93,4 +104,3 @@ def patch():
     print('\nMONKEY PATCHING KERAS tensorflow_backend.Function\n',
           file=sys.stderr)
     tfb.Function = Function
-

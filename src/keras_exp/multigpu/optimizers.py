@@ -1,4 +1,10 @@
 '''
+Attempt to implement synchronous optimizers for Keras models. A synchronous
+optimizers averages the gradients across devices. This should result in more
+consistent learning convergence rate. An alternative popular implementation is
+via Horovod.
+
+Note, the current implementation might not be working correctly.
 '''
 from __future__ import print_function
 import sys
@@ -20,21 +26,22 @@ if K.backend() == 'tensorflow':
 
     try:
         from tensorflow.contrib import nccl
-        have_nccl = True
+        HAVE_NCCL = True
         print('NCCL support available', file=sys.stderr)
     except ImportError:
-        have_nccl = False
+        HAVE_NCCL = False
         print('WARNING: NCCL support not available', file=sys.stderr)
 
 
 __all__ = (
     'OptimizerMultiGPUMixin',
     'AdagradMGPU', 'AdadeltaMGPU', 'AdamMGPU', 'AdamaxMGPU', 'NadamMGPU',
-    'RMSPropMGPU', 'SGD_MGPU', 'TFOptimizerMGPU',)
+    'RMSPropMGPU', 'SgdMGPU', 'TFOptimizerMGPU',)
 
 
-def all_avg_gradients(tower_gradvars, devices, param_server_device='/gpu:0',
-                      usenccl=True):
+def all_avg_gradients(
+        tower_gradvars, devices, param_server_device='/gpu:0', usenccl=True):
+    '''Take the average of gradients across devices'''
     if len(devices) == 1:
         return tower_gradvars
 
@@ -42,14 +49,14 @@ def all_avg_gradients(tower_gradvars, devices, param_server_device='/gpu:0',
     avg_gradvars = []
     for layer in zip(*tower_gradvars):
         grads_on_devices, vars_on_devices = zip(*layer)
-        if have_nccl and usenccl:
+        if HAVE_NCCL and usenccl:
             # Note: These nccl ops _must_ be run on all devices, else deadlock
             # print('ALL_AVG_GRADIENTS GRADS_ON_DEVICES:',
             #       grads_on_devices)  # DEBUG
             avg_grads_on_devices = nccl.all_sum(grads_on_devices)
-            for d, device in enumerate(devices):
+            for idev, device in enumerate(devices):
                 with tf.device(device):
-                    avg_grads_on_devices[d] *= 1. / num_devices
+                    avg_grads_on_devices[idev] *= 1. / num_devices
         else:
             with tf.device(param_server_device):
                 avg_grad = tf.reduce_mean(tf.stack(grads_on_devices), 0)
@@ -61,17 +68,15 @@ def all_avg_gradients(tower_gradvars, devices, param_server_device='/gpu:0',
 
 
 class TFOptimizerMGPU(TFOptimizer):
-    """Wrapper class for native TensorFlow optimizers.
-    """
+    '''Wrapper class for native TensorFlow optimizers.'''
 
     def __init__(self, optimizer, gdev_list=None):
-        self.optimizer = optimizer
+        TFOptimizer.__init__(self, optimizer)
         self._gdev_list = gdev_list
-        with K.name_scope(self.__class__.__name__):
-            self.iterations = K.variable(0, dtype='int64', name='iterations')
 
     @property
     def ismgpu(self):
+        '''Property to indicate this is a multigpu enabled optimizer.'''
         return True
 
     def get_updates(self, loss, params):
@@ -106,7 +111,7 @@ class TFOptimizerMGPU(TFOptimizer):
 
 class OptimizerMultiGPUMixin(object):
     '''
-    Refer to classes below (such a SGD_MGPU) for an example of how to use
+    Refer to classes below (such a SgdMGPU) for an example of how to use
     this mixin.
     '''
     # :param baseopt: A base class keras optimizer such as SGD, RMSprop,...
@@ -148,10 +153,12 @@ class OptimizerMultiGPUMixin(object):
 
     @property
     def ismgpu(self):
+        '''Property to indicate this is a multigpu enabled optimizer.'''
         return True
 
     @property
     def usenccl(self):
+        '''Property to indicate if using the nccl contrib library.'''
         return self._usenccl
 
     @usenccl.setter
@@ -184,13 +191,13 @@ class OptimizerMultiGPUMixin(object):
                 # are aggregated by all_avg_gradients. Something doesn't seem
                 # right though. SOMEWHAT SLOW.
                 # TODO: Need to figure out how to efficiently aggregate.
-                colo = True if not self._usenccl else not have_nccl
+                colo = True if not self._usenccl else not HAVE_NCCL
                 # colo = True
                 grads = tf.gradients(
                     loss, params,
                     # # GATE_NONE faster??
                     # gate_gradients=tf.train.Optimizer.GATE_NONE,
-                    colocate_gradients_with_ops=colo)  # not have_nccl
+                    colocate_gradients_with_ops=colo)
 
                 if hasattr(self, 'clipnorm') and self.clipnorm > 0:
                     norm = K.sqrt(sum([K.sum(K.square(g)) for g in grads]))
@@ -256,7 +263,7 @@ class OptimizerMultiGPUMixin(object):
                 updates_ = self._baseopt.get_updates(loss, params)
             updates += [up for up in updates_ if up not in updates]
 
-            if (not have_nccl or not self.usenccl) and idev == 0:
+            if (not HAVE_NCCL or not self.usenccl) and idev == 0:
                 # no need to iterate over all devices
                 break
 
@@ -286,35 +293,41 @@ class OptimizerMultiGPUMixin(object):
 
 @mixedomatic(ignore_kargs_spec=True)
 class AdagradMGPU(OptimizerMultiGPUMixin, Adagrad):
+    '''Multigpu Adagrad'''
     pass
 
 
 @mixedomatic(ignore_kargs_spec=True)
 class AdadeltaMGPU(OptimizerMultiGPUMixin, Adadelta):
+    '''Multigpu Adadelta'''
     pass
 
 
 @mixedomatic(ignore_kargs_spec=True)
 class AdamMGPU(OptimizerMultiGPUMixin, Adam):
+    '''Multigpu Adam'''
     pass
 
 
 @mixedomatic(ignore_kargs_spec=True)
 class AdamaxMGPU(OptimizerMultiGPUMixin, Adamax):
+    '''Multigpu Adamax'''
     pass
 
 
 @mixedomatic(ignore_kargs_spec=True)
 class NadamMGPU(OptimizerMultiGPUMixin, Nadam):
+    '''Multigpu Nadam'''
     pass
 
 
 @mixedomatic(ignore_kargs_spec=True)
 class RMSPropMGPU(OptimizerMultiGPUMixin, RMSprop):
+    '''Multigpu RMSprop'''
     pass
 
 
 @mixedomatic(ignore_kargs_spec=True)
-class SGD_MGPU(OptimizerMultiGPUMixin, SGD):
+class SgdMGPU(OptimizerMultiGPUMixin, SGD):
+    '''Multigpu SGD'''
     pass
-
